@@ -1018,6 +1018,19 @@ Status TrtNodeValidator::ConvertToTensorOrWeights(
     std::vector<TRT_TensorOrWeights> inputs;
     return ConvertVariableToWeights(node_def, inputs, tensor_or_weights);
   }
+  // else if (node_def.op() == "Identity") {
+  //   // TODO: refactor!
+  //   if (output_port != 0) {
+  //     return errors::InvalidArgument(
+  //         "Identity node should only have one output.");
+  //   }
+
+  //   TRT_TensorOrWeights input = ;
+  //   if (input.is_weights()) {
+  //     *tensor_or_weights = input.at(0);
+  //     return Status::OK();
+  //   }
+  // }
 
   if (!graph_properties_.HasOutputProperties(node_def.name())) {
     return errors::InvalidArgument("Shape and data type are unknown");
@@ -1066,7 +1079,16 @@ Status TrtNodeValidator::IsTensorRTCandidate(const Node* node) {
   TF_RETURN_IF_ERROR(node->input_edges(&input_edges));
   for (const Edge* edge : input_edges) {
     TRT_TensorOrWeights tensor_or_weights;
-    const NodeDef& src_def = edge->src()->def();
+
+    // Go up the chain of Identity nodes.
+    Node* src_node = edge->src();
+    while(src_node->def().op() == "Identity") {
+      std::vector<const Edge*> input_edges_temp;
+      TF_RETURN_IF_ERROR(src_node->input_edges(&input_edges_temp));
+      src_node = input_edges_temp[0]->src();
+    }
+    const NodeDef& src_def = src_node->def();
+
     Status status = ConvertToTensorOrWeights(src_def, edge->src_output(),
                                              &tensor_or_weights);
     if (!status.ok()) {
