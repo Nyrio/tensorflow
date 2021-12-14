@@ -1157,10 +1157,22 @@ class TrtGraphConverterV2(object):
       raise ValueError("Should not specify calibration_input_fn because INT8 "
                        "calibration is not needed")
 
+    def _apply_inline_opt(func_in):
+      """TODO: this is a temporary fix!"""
+      lower_control_flow = True
+      aggressive_inlining = False
+
+      graph_def = convert_to_constants._run_inline_graph_optimization(
+        func, lower_control_flow, aggressive_inlining)
+
+      return convert_to_constants._construct_concrete_function(
+        func_in, graph_def, set())
+
     self._saved_model = load.load(self._input_saved_model_dir,
                                   self._input_saved_model_tags)
     func = self._saved_model.signatures[self._input_saved_model_signature_key]
-    frozen_func = convert_to_constants.convert_variables_to_constants_v2(func)
+    # frozen_func = convert_to_constants.convert_variables_to_constants_v2(func)
+    frozen_func = _apply_inline_opt(func)
     grappler_meta_graph_def = saver.export_meta_graph(
         graph_def=frozen_func.graph.as_graph_def(), graph=frozen_func.graph)
 

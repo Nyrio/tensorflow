@@ -214,6 +214,11 @@ string TFAttrs::get<string>(const string& key) const {
 }
 
 template <>
+TensorShapeProto TFAttrs::get<TensorShapeProto>(const string& key) const {
+  return this->at(key)->shape();
+}
+
+template <>
 std::vector<int64_t> TFAttrs::get<std::vector<int64_t>>(
     const string& key) const {
   auto attr = this->at(key)->list().i();
@@ -989,20 +994,31 @@ StatusOr<OpConverter> TrtNodeValidator::GetValidator(const std::string& op) {
 Status TrtNodeValidator::ConvertToTensorOrWeights(
     const NodeDef& node_def, int output_port,
     TRT_TensorOrWeights* tensor_or_weights) {
+  // The output of the conversion will be used as input to other nodes to
+  // determine whether TRT supports those nodes. If it cannot convert the
+  // Const, it's very likely we cannot treat it as a tensor and make it an
+  // input to the TRT network, since TRT removes the first dimension and
+  // treats it as batch size. Also, it's not likely that the converter can
+  // support the op, and performance may suffer even if it can, so we just
+  // simply return error if the conversion fails.
   if (node_def.op() == "Const") {
     if (output_port != 0) {
       return errors::InvalidArgument("Const node should only have one output.");
     }
-    // The output of the conversion will be used as input to other nodes to
-    // determine whether TRT supports those nodes. If it cannot convert the
-    // Const, it's very likely we cannot treat it as a tensor and make it an
-    // input to the TRT network, since TRT removes the first dimension and
-    // treats it as batch size. Also, it's not likely that the converter can
-    // support the op, and performance may suffer even if it can, so we just
-    // simply return error if the conversion fails.
     std::vector<TRT_TensorOrWeights> inputs;
     return ConvertConstToWeights(node_def, inputs, tensor_or_weights);
   }
+  else if (node_def.op() == "VariableV2") {
+    // TODO: refactor!
+    if (output_port != 0) {
+      return errors::InvalidArgument(
+          "VariableV2 node should only have one output.");
+    }
+
+    std::vector<TRT_TensorOrWeights> inputs;
+    return ConvertVariableToWeights(node_def, inputs, tensor_or_weights);
+  }
+
   if (!graph_properties_.HasOutputProperties(node_def.name())) {
     return errors::InvalidArgument("Shape and data type are unknown");
   }
@@ -1080,6 +1096,24 @@ Status TrtNodeValidator::ConvertConstToWeights(
   auto const_val = GetValidator("Const");
   TF_RETURN_IF_ERROR(const_val.status());
   Status status = (*const_val)(&params);
+  if (status.ok() && (output != nullptr)) {
+    *output = outputs[0];
+  }
+  return status;
+}
+
+// TODO: combine with ConvertConstToWeights with boolean parameter?
+Status TrtNodeValidator::ConvertVariableToWeights(
+    const NodeDef& const_node_def,
+    const std::vector<TRT_TensorOrWeights>& inputs,
+    TRT_TensorOrWeights* output) {
+  std::vector<TRT_TensorOrWeights> outputs;
+  OpConverterParams params(const_node_def, inputs, &outputs, &weight_store_,
+                           precision_mode_, use_calibration_,
+                           use_implicit_batch_, use_explicit_precision_);
+  auto variable_val = GetValidator("VariableV2");
+  TF_RETURN_IF_ERROR(variable_val.status());
+  Status status = (*variable_val)(&params);
   if (status.ok() && (output != nullptr)) {
     *output = outputs[0];
   }
@@ -3871,6 +3905,41 @@ Status ConvertConst(OpConverterParams* params) {
     return errors::InvalidArgument("DataType mismatch between attr (",
                                    DataTypeString(dtype), ") and tensor (",
                                    DataTypeString(tensor.dtype()), ")");
+  }
+
+  TRT_ShapedWeights weights;
+  TF_RETURN_IF_ERROR(
+      TfTensorToTrtWeights(tensor, params->weight_store, &weights));
+
+  if (params->outputs != nullptr) {
+    params->outputs->push_back(TRT_TensorOrWeights(weights));
+  }
+  return Status::OK();
+}
+
+// TODO: use new converter interface.
+Status ConvertVariableV2(OpConverterParams* params) {
+  const auto& inputs = params->inputs;
+  const auto& node_def = params->node_def;
+  if (!inputs.empty()) {
+    return errors::InvalidArgument(
+        "VariableV2 node is expected to have empty input list");
+  }
+
+  TFAttrs attrs(node_def);
+  const DataType dtype = attrs.get<DataType>("dtype");
+  const TensorShape shape(attrs.get<TensorShapeProto>("shape"));
+
+  // Chosen by fair dice roll. Guaranteed to be random :)
+  float random_number = 4;
+
+  // Create shaped weights as output.
+  // TODO: fill with correct values
+  // TODO: non fp32 types (switch + template)
+  Tensor tensor(DataType::DT_FLOAT, shape);
+  auto tensor_flat = tensor.flat<float>();
+  for (int64_t i = 0; i < tensor_flat.size(); i++) {
+    tensor_flat(i) = random_number;
   }
 
   TRT_ShapedWeights weights;
@@ -6792,6 +6861,7 @@ REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertStridedSlice, "StridedSlice");
 REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertTopK, "TopKV2");
 REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertTranspose, "Transpose");
 REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertUnpack, "Unpack");
+REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertVariableV2, "VariableV2");
 template <typename T>
 absl::InlinedVector<std::string, 10> GetOperationNames(const T& set) {
   absl::InlinedVector<std::string, 10> result;
