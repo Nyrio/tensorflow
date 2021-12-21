@@ -42,6 +42,7 @@ limitations under the License.
 #include "tensorflow/compiler/tf2tensorrt/utils/trt_logger.h"
 #include "tensorflow/compiler/tf2tensorrt/utils/trt_shape_optimization_profiles.h"
 #include "tensorflow/core/common_runtime/graph_constructor.h"
+#include "tensorflow/core/common_runtime/process_function_library_runtime.h"
 #include "tensorflow/core/framework/node_def.pb.h"  // NOLINT
 #include "tensorflow/core/framework/node_def_builder.h"
 #include "tensorflow/core/framework/tensor.pb.h"  // NOLINT
@@ -1007,8 +1008,7 @@ Status TrtNodeValidator::ConvertToTensorOrWeights(
     }
     std::vector<TRT_TensorOrWeights> inputs;
     return ConvertConstToWeights(node_def, inputs, tensor_or_weights);
-  }
-  else if (node_def.op() == "VariableV2") {
+  } else if (node_def.op() == "VariableV2") {
     // TODO: refactor!
     if (output_port != 0) {
       return errors::InvalidArgument(
@@ -1082,7 +1082,7 @@ Status TrtNodeValidator::IsTensorRTCandidate(const Node* node) {
 
     // Go up the chain of Identity nodes.
     Node* src_node = edge->src();
-    while(src_node->def().op() == "Identity") {
+    while (src_node->def().op() == "Identity") {
       std::vector<const Edge*> input_edges_temp;
       TF_RETURN_IF_ERROR(src_node->input_edges(&input_edges_temp));
       src_node = input_edges_temp[0]->src();
@@ -1146,10 +1146,11 @@ Status TrtNodeValidator::ConvertVariableToWeights(
 StatusOr<std::unique_ptr<Converter>> Converter::Create(
     TrtPrecisionMode precision_mode, bool use_calibration,
     nvinfer1::ILogger* trt_logger, const bool use_implicit_batch,
-    absl::string_view engine_name, bool use_explicit_precision) {
-  std::unique_ptr<Converter> converter = absl::WrapUnique(
-      new Converter(precision_mode, use_calibration, trt_logger,
-                    use_implicit_batch, engine_name, use_explicit_precision));
+    absl::string_view engine_name, bool use_explicit_precision,
+    OpKernelContext* ctx) {
+  std::unique_ptr<Converter> converter = absl::WrapUnique(new Converter(
+      precision_mode, use_calibration, trt_logger, use_implicit_batch,
+      engine_name, use_explicit_precision, ctx));
   TF_RETURN_IF_ERROR(converter->Init(trt_logger));
   return converter;
 }
@@ -1157,12 +1158,14 @@ StatusOr<std::unique_ptr<Converter>> Converter::Create(
 Converter::Converter(TrtPrecisionMode precision_mode, bool use_calibration,
                      nvinfer1::ILogger* trt_logger,
                      const bool use_implicit_batch,
-                     absl::string_view engine_name, bool use_explicit_precision)
+                     absl::string_view engine_name, bool use_explicit_precision,
+                     OpKernelContext* ctx)
     : precision_mode_(precision_mode),
       use_calibration_(use_calibration),
       use_implicit_batch_(use_implicit_batch),
       engine_name_(engine_name),
-      use_explicit_precision_(use_explicit_precision) {
+      use_explicit_precision_(use_explicit_precision),
+      ctx_(ctx) {
   MaybeInitializeTrtPlugins(trt_logger);
 }
 
@@ -3950,19 +3953,94 @@ Status ConvertVariableV2(OpConverterParams* params) {
 
   TFAttrs attrs(node_def);
   const DataType dtype = attrs.get<DataType>("dtype");
-  const TensorShape shape(attrs.get<TensorShapeProto>("shape"));
-
-  // Chosen by fair dice roll. Guaranteed to be random :)
-  float random_number = 4;
+  const TensorShapeProto shape_proto = attrs.get<TensorShapeProto>("shape");
+  const TensorShape shape(shape_proto);
+  const string shared_name = attrs.get<string>("shared_name");
+  const string name = node_def.name();
 
   // Create shaped weights as output.
-  // TODO: fill with correct values
   // TODO: non fp32 types (switch + template)
+  // TODO: run session with variable ops
   Tensor tensor(DataType::DT_FLOAT, shape);
   auto tensor_flat = tensor.flat<float>();
-  for (int64_t i = 0; i < tensor_flat.size(); i++) {
-    tensor_flat(i) = random_number;
+  if (params->validation_only) {
+    for (int64_t i = 0; i < tensor_flat.size(); i++) {
+      tensor_flat(i) = 4;
+    }
+  } else {
+    // TODO: get this from somewhere? or don't need bc executing synchronously?
+    // auto async_helper = ;
+
+    // auto resource_manager = params->converter->context()->resource_manager();
+
+    auto ctx = params->converter->context();
+    auto lib = ctx->function_library();
+
+    // Clone function library runtime to add functions.
+    std::unique_ptr<FunctionLibraryDefinition> lib_def;
+    std::unique_ptr<ProcessFunctionLibraryRuntime> lib_pflr;
+    FunctionLibraryRuntime* lib_clone;  // TODO: destroy?
+    TF_RETURN_IF_ERROR(lib->Clone(&lib_def, &lib_pflr, &lib_clone));
+
+    // Create function definition.
+    string func_name = name + "/func";
+    FunctionDef fdef = FunctionDefHelper::Define(
+        func_name,       // Name
+        {},              // Args
+        {"out: float"},  // Returns
+        {},              // Attr def
+        // Nodes
+        {{{name},
+          "VariableV2",
+          {},
+          {{"dtype", DT_FLOAT},
+           {"shape", shape_proto},
+           {"shared_name", shared_name}}},
+         {{"out"}, "Identity", {name}, {{"T", DT_FLOAT}}}});
+
+    // Add function definition to the library.
+    lib_def->AddFunctionDef(fdef);
+
+    // Instanciate function.
+    FunctionLibraryRuntime::Handle func_handle;
+    FunctionLibraryRuntime::InstantiateOptions inst_ops;
+    inst_ops.state_handle = "";
+    inst_ops.target = ctx->device()->name();
+    AttrValueMap attr_list;  // TODO: what attributes should it have?
+    TF_RETURN_IF_ERROR(lib_clone->Instantiate(func_name, AttrSlice(&attr_list),
+                                              inst_ops, &func_handle));
+
+    FunctionLibraryRuntime::Options opts;
+    opts.rendezvous = ctx->rendezvous();
+    opts.cancellation_manager = ctx->cancellation_manager();
+    opts.runner = ctx->runner();
+    // TODO: figure out these options
+
+    std::vector<Tensor> args;  // empty
+    // TODO: figure out whether this needs to be destroyed
+    std::vector<Tensor>* rets = new std::vector<Tensor>();
+
+    // Run the new function synchronously.
+    lib_clone->RunSync(opts, func_handle, args, rets);
+
+    VLOG(1) << "Out size: " << rets->size();
+
+    // Copy tensor.
+    // TODO: figure out if tensor is on host or device?
+    const cudaStream_t* stream = CHECK_NOTNULL(
+        reinterpret_cast<const cudaStream_t*>(ctx->op_device_context()
+                                                  ->stream()
+                                                  ->implementation()
+                                                  ->GpuStreamMemberHack()));
+
+    cudaMemcpyAsync(tensor_flat.data(), rets->at(0).flat<float>().data(),
+                    rets->at(0).NumElements() * sizeof(float),
+                    cudaMemcpyDeviceToHost, *stream);
+                    // TODO: error checking
+
+    // TODO: remove function definition from library?
   }
+  // TODO: do we need the values during validation?
 
   TRT_ShapedWeights weights;
   TF_RETURN_IF_ERROR(
@@ -6913,8 +6991,8 @@ REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertBatchMatMul,
                                   {"BatchMatMul", "BatchMatMulV2"});
 
 Status ConvertGraphDefToEngine(
-    const GraphDef& gdef, TrtPrecisionMode precision_mode, int max_batch_size,
-    size_t max_workspace_size_bytes,
+    const GraphDef& gdef, OpKernelContext* ctx, TrtPrecisionMode precision_mode,
+    int max_batch_size, size_t max_workspace_size_bytes,
     const std::vector<PartialTensorShape>& input_shapes,
     nvinfer1::ILogger* trt_logger, nvinfer1::IGpuAllocator* allocator,
     TRTInt8Calibrator* calibrator,
@@ -6928,7 +7006,7 @@ Status ConvertGraphDefToEngine(
   // Creating converter, TensorRT builder and network
   auto statusor = Converter::Create(precision_mode, use_calibration, trt_logger,
                                     use_implicit_batch, engine_name,
-                                    use_explicit_precision);
+                                    use_explicit_precision, ctx);
 
   TF_RETURN_IF_ERROR(statusor.status());
   std::unique_ptr<Converter> converter = std::move(statusor.ValueOrDie());

@@ -1038,7 +1038,7 @@ class ConvertGraphDefToEngineTest : public ::testing::Test {
     }
     // TODO(laigd): execute the engine and get outputs.
     return ConvertGraphDefToEngine(
-        gdef, TrtPrecisionMode::FP32, /*max_batch_size=*/1,
+        gdef, nullptr, TrtPrecisionMode::FP32, /*max_batch_size=*/1,
         /*max_workspace_size_bytes=*/64 << 20, input_shapes, &logger_,
         /*allocator=*/nullptr, /*calibrator=*/nullptr, &engine_,
         /*use_calibration=*/false, /*use_implicit_batch=*/true,

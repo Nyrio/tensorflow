@@ -192,9 +192,9 @@ class TRTEngineOp : public AsyncOpKernel {
   // engine fails, enters a dummy entry into the cache_resource cache so we
   // don't continually try to build the same failing engine.
   StatusOr<TrtUniquePtrType<nvinfer1::ICudaEngine>> BuildEngine(
-      const std::vector<TensorShape>& input_concrete_shapes, int batch_size,
-      bool use_calibration, TRTInt8Calibrator* calibrator,
-      TRTEngineCacheResource* cache_resource);
+      const std::vector<TensorShape>& input_concrete_shapes,
+      OpKernelContext* ctx, int batch_size, bool use_calibration,
+      TRTInt8Calibrator* calibrator, TRTEngineCacheResource* cache_resource);
 
   // Verify that the input shapes are consistent and can be handled by this op.
   Status VerifyInputShapes(const std::vector<TensorShape>& shapes);
@@ -1008,8 +1008,8 @@ Status TRTEngineOp::GetEngineCacheResource(OpKernelContext* ctx,
 }
 
 StatusOr<TrtUniquePtrType<nvinfer1::ICudaEngine>> TRTEngineOp::BuildEngine(
-    const std::vector<TensorShape>& input_concrete_shapes, int batch_size,
-    bool use_calibration, TRTInt8Calibrator* calibrator,
+    const std::vector<TensorShape>& input_concrete_shapes, OpKernelContext* ctx,
+    int batch_size, bool use_calibration, TRTInt8Calibrator* calibrator,
     TRTEngineCacheResource* cache_resource) {
   // Use concrete shapes for implicit batch mode and partial shapes for
   // explicit batch mode.
@@ -1026,7 +1026,7 @@ StatusOr<TrtUniquePtrType<nvinfer1::ICudaEngine>> TRTEngineOp::BuildEngine(
 
   TrtUniquePtrType<nvinfer1::ICudaEngine> engine;
   auto status = convert::ConvertGraphDefToEngine(
-      segment_graph_def_, precision_mode_, batch_size, workspace_size_,
+      segment_graph_def_, ctx, precision_mode_, batch_size, workspace_size_,
       conversion_input_shapes, &logger, cache_resource->allocator_.get(),
       calibrator, &engine, use_calibration, use_implicit_batch_, nullptr,
       &cache_resource->profiles_, name(), use_explicit_precision_);
@@ -1129,7 +1129,7 @@ StatusOr<std::pair<EngineContext*, int>> TRTEngineOp::GetEngine(
                                             << "Reason: " << status;
         }
       }
-      auto result = BuildEngine(input_concrete_shapes, batch_size,
+      auto result = BuildEngine(input_concrete_shapes, ctx, batch_size,
                                 /*use_calibration=*/false,
                                 /*calibrator=*/nullptr, cache_res);
       if (!result.ok()) {
@@ -1197,7 +1197,7 @@ StatusOr<std::pair<EngineContext*, int>> TRTEngineOp::GetEngine(
 
     // Up to this point, calibrator_ can never be empty, since otherwise it
     // means calibration_mode_ is true and this path won't get executed.
-    auto result = BuildEngine(input_concrete_shapes, batch_size,
+    auto result = BuildEngine(input_concrete_shapes, ctx, batch_size,
                               use_calibration_, calibrator_.get(), cache_res);
     if (!result.ok()) {
       return std::pair<EngineContext*, int>(&empty_context, 0);
@@ -1263,7 +1263,7 @@ Status TRTEngineOp::AllocateCalibrationResources(
 
   cache_res->Ref();
   cres->thr_.reset(new std::thread([this, cres, shapes, platform_device_id,
-                                    cache_res]() {
+                                    cache_res, ctx]() {
     core::ScopedUnref sc(cache_res);
 
     VLOG(1) << "Starting calibration thread on device " << platform_device_id
@@ -1285,7 +1285,7 @@ Status TRTEngineOp::AllocateCalibrationResources(
     // TODO(aaroey): maybe setting the max batch size using the python
     // calibration wrapper class.
     auto s = convert::ConvertGraphDefToEngine(
-        this->segment_graph_def_, TrtPrecisionMode::INT8,
+        this->segment_graph_def_, ctx, TrtPrecisionMode::INT8,
         cres->calibrator_->getBatchSize(), this->workspace_size_,
         partial_shapes, &cache_res->GetLogger(), cache_res->allocator_.get(),
         cres->calibrator_.get(), &cres->engine_, /*use_calibration=*/true,
