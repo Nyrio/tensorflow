@@ -55,6 +55,7 @@ limitations under the License.
 #include "tensorflow/core/platform/env_time.h"
 #include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/mutex.h"
+#include "tensorflow/core/platform/refcount.h"
 #include "tensorflow/core/platform/status.h"
 #include "tensorflow/core/platform/statusor.h"
 #include "tensorflow/core/platform/thread_annotations.h"
@@ -1535,7 +1536,8 @@ void DataServiceDatasetOp::MakeDataset(OpKernelContext* ctx,
         GetValidatedCompression(dataset_id, *metadata);
     OP_REQUIRES_OK(ctx, compression.status());
     should_uncompress =
-        should_uncompress && (*compression == DataServiceMetadata::SNAPPY);
+        should_uncompress &&
+        (*compression == DataServiceMetadata::COMPRESSION_SNAPPY);
   }
   DataTypeVector data_service_output_types = output_types_;
   std::vector<PartialTensorShape> data_service_output_shapes = output_shapes_;
@@ -1561,11 +1563,16 @@ void DataServiceDatasetOp::MakeDataset(OpKernelContext* ctx,
   if (should_uncompress) {
     VLOG(2) << "Inserting a ParallelMap dataset to uncompress tf.data service "
             << "dataset " << dataset_id << ".";
+    dataset->Initialize(/*metadata=*/{});
     captured_uncompress_func.reset();
     OP_REQUIRES_OK(
         ctx, CapturedFunction::Create(ctx, uncompress_fn_,
                                       /*captured_inputs=*/std::vector<Tensor>{},
                                       &captured_uncompress_func));
+
+    // Release the ownership of `dataset` and transfer it to the ParallelMap
+    // dataset for uncompression.
+    core::ScopedUnref unref(dataset);
     dataset = MakeDataServiceUncompressDataset(
                   /*input=*/dataset, std::move(captured_uncompress_func),
                   output_types_, output_shapes_)

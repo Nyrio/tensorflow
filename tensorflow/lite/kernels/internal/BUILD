@@ -529,6 +529,7 @@ cc_library(
         "reference/floor_mod.h",
         "reference/fully_connected.h",
         "reference/gather.h",
+        "reference/gelu.h",
         "reference/hard_swish.h",
         "reference/integer_ops/add.h",
         "reference/integer_ops/conv.h",
@@ -592,6 +593,7 @@ cc_library(
     deps = [
         ":common",
         ":compatibility",
+        ":constants",
         ":cppmath",
         ":quantization_util",
         ":strided_slice_logic",
@@ -1129,6 +1131,13 @@ cc_library(
         ":x86_any": ["@arm_neon_2_x86_sse"],
         "//conditions:default": [],
     }),
+)
+
+cc_library(
+    name = "constants",
+    hdrs = ["constants.h"],
+    compatible_with = get_compatible_with_portable(),
+    copts = tflite_copts(),
 )
 
 cc_test(

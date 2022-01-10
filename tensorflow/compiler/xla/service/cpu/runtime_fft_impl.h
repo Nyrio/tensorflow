@@ -20,14 +20,13 @@ limitations under the License.
 #include "third_party/eigen3/Eigen/Core"
 #include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
 #include "tensorflow/core/framework/numeric_types.h"
-#include "tensorflow/core/platform/types.h"
 
 // 'tensorflow' namespace is used so that int64_t and other types don't require
 // qualification.
 namespace tensorflow {
 namespace xla {
 
-enum class FftType : int32 {
+enum class FftType : int32_t {
   FFT = 0,    // Forward FFT; complex in, complex out.
   IFFT = 1,   // Inverse FFT; complex in, complex out.
   RFFT = 2,   // Forward real FFT; real in, fft_length / 2 + 1 complex out

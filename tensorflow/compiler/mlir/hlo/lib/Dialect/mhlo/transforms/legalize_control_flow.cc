@@ -62,7 +62,7 @@ void ReplaceTerminators(Region* region, Block* target_block, Location loc,
 void LowerIfOp(mlir::mhlo::IfOp if_op) {
   Operation* op_inst = if_op.getOperation();
   mlir::OpBuilder builder(if_op);
-  auto orig_block = op_inst->getBlock();
+  auto* orig_block = op_inst->getBlock();
   auto* tail_block = orig_block->splitBlock(op_inst);
   auto loc = if_op.getLoc();
 
@@ -84,25 +84,22 @@ void LowerIfOp(mlir::mhlo::IfOp if_op) {
   // Extract the predicate for checking branching, then branch to the true and
   // false regions appropriately.
   auto cond_value = builder.create<mlir::tensor::ExtractOp>(loc, if_op.pred());
-  builder.create<mlir::CondBranchOp>(loc, cond_value, true_block,
-                                     if_op.true_arg(), false_block,
-                                     if_op.false_arg());
+  builder.create<mlir::CondBranchOp>(loc, cond_value, true_block, ValueRange{},
+                                     false_block, ValueRange{});
 
   // Replace the true case's return operations with a branch to the tail of
   // the condition.
   ReplaceTerminators(&if_op.true_branch(), tail_block, loc, mapper, &builder);
   ReplaceTerminators(&if_op.false_branch(), tail_block, loc, mapper, &builder);
 
-  tail_block->addArguments(if_op.getResult().getType());
-  if_op.getResult().replaceAllUsesWith(tail_block->getArgument(0));
+  tail_block->addArguments(if_op.getResultTypes());
+  for (auto it : llvm::zip(if_op.getResults(), tail_block->getArguments()))
+    std::get<0>(it).replaceAllUsesWith(std::get<1>(it));
 
   op_inst->erase();
 }
 
 LogicalResult LowerWhileOp(mlir::mhlo::WhileOp while_op) {
-  // TODO(jpienaar): Support multi-operand while op.
-  if (while_op.arg().size() != 1) return failure();
-
   // Converts a MHLO while loop into control flow. This generates a set of MLIR
   // blocks and branches, along with inlining the regions provided by the MHLO
   // while loop. The structure should be similar to below:
@@ -137,8 +134,7 @@ LogicalResult LowerWhileOp(mlir::mhlo::WhileOp while_op) {
   //     <prior operations>
   //     br ^cond(%arg0) // Jumps to the condition statement.
   builder.setInsertionPointToEnd(orig_block);
-  // TODO(jpienaar): Support multi-operand while op.
-  builder.create<mlir::BranchOp>(loc, cond_block, while_op.arg()[0]);
+  builder.create<mlir::BranchOp>(loc, cond_block, while_op.getOperands());
 
   // Updates the inlined condition blocks by replacing the return op with an
   // tensor.extract and conditional branch. This changes the block below:
@@ -158,7 +154,7 @@ LogicalResult LowerWhileOp(mlir::mhlo::WhileOp while_op) {
   // block for regions nested inside of a operations (MLIR ReturnOp cannot be
   // nested within an non-function region).
   for (auto& block : while_op.cond()) {
-    auto new_block = mapper.lookup(&block);
+    auto* new_block = mapper.lookup(&block);
 
     auto return_op = dyn_cast<mhlo::ReturnOp>(new_block->getTerminator());
     if (!return_op) continue;
@@ -188,7 +184,7 @@ LogicalResult LowerWhileOp(mlir::mhlo::WhileOp while_op) {
   //     <inlined body block>
   //     br ^cond(%0) // Branch.
   for (auto& block : while_op.body()) {
-    auto new_block = mapper.lookup(&block);
+    auto* new_block = mapper.lookup(&block);
     auto return_op = dyn_cast<mlir::mhlo::ReturnOp>(new_block->getTerminator());
     if (!return_op) continue;
     builder.setInsertionPointToEnd(new_block);
@@ -197,9 +193,10 @@ LogicalResult LowerWhileOp(mlir::mhlo::WhileOp while_op) {
   }
 
   // Erase the original while loop.
-  // TODO(jpienaar): Support multi-operand while op.
-  tail_block->addArgument(while_op.arg().getType()[0]);
-  while_op.getResult(0).replaceAllUsesWith(tail_block->getArgument(0));
+  tail_block->addArguments(while_op.getOperandTypes());
+  for (auto it : llvm::zip(while_op.getResults(), tail_block->getArguments()))
+    std::get<0>(it).replaceAllUsesWith(std::get<1>(it));
+
   op_inst->erase();
 
   return success();
@@ -263,16 +260,12 @@ void LowerCaseOp(mlir::mhlo::CaseOp case_op) {
   // go.
   SmallVector<Block*> branch_blocks;
   branch_blocks.reserve(branch_count);
-  for (auto it : llvm::zip(case_op.branches(), case_op.branch_operands())) {
-    Region& branch_region = std::get<0>(it);
-    Value incoming_branch_operand = std::get<1>(it);
+  for (Region& branch_region : case_op.branches()) {
     Block* branch_block = &branch_region.front();
 
     // Move the existing branch block in and replace its argument with the
     // incoming (outer) value.
     branch_block->moveBefore(tail_block);
-    branch_block->getArgument(0).replaceAllUsesWith(incoming_branch_operand);
-    branch_block->eraseArgument(0);
 
     // Replace return terminator with a branch to the tail block.
     auto return_op = dyn_cast<mhlo::ReturnOp>(branch_block->getTerminator());

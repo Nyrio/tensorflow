@@ -813,7 +813,7 @@ tf_cuda_library(
     visibility = [
         "//tensorflow/core:__pkg__",
         "//tensorflow/core/runtime_fallback:__subpackages__",
-        "//tensorflow/core/tfrt/utils:__subpackages__",
+        "//tensorflow/core/tfrt:__subpackages__",
         "//tensorflow/core/util:__pkg__",
         "//tensorflow/security/fuzzing:__subpackages__",
     ],
@@ -1058,10 +1058,10 @@ cc_library(
         ":op_def_builder",
         ":op_def_proto_cc",
         ":tensor",
-        ":types_proto_cc",
         "//tensorflow/core/platform:errors",
         "//tensorflow/core/platform:statusor",
         "//tensorflow/core/protobuf:error_codes_proto_impl_cc",
+        "@com_google_absl//absl/container:flat_hash_map",
     ],
 )
 

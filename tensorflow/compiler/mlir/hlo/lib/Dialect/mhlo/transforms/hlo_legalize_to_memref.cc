@@ -224,7 +224,7 @@ class HloToMemrefDynamicBroadcastInDimOpConverter
     strides.reserve(result_rank);
 
     DenseMap<int, int> output_to_input_dim;
-    for (auto dim : llvm::enumerate(op.broadcast_dimensions())) {
+    for (const auto& dim : llvm::enumerate(op.broadcast_dimensions())) {
       output_to_input_dim[dim.value().getSExtValue()] = dim.index();
     }
     for (int i = 0; i < result_rank; ++i) {
@@ -340,10 +340,10 @@ struct HloLegalizeToMemrefPass
 void populateHLOToMemrefConversionPattern(
     bufferization::BufferizeTypeConverter* converter,
     RemoveSignTypeConverter* sign_converter, OwningRewritePatternList* patterns,
-    std::function<bool(Operation*)> enforce_identity_maps) {
+    const std::function<bool(Operation*)>& enforce_identity_maps) {
   MLIRContext* context = patterns->getContext();
   patterns->insert<HloToMemrefDynamicBroadcastInDimOpConverter>(
-      *converter, sign_converter, context, std::move(enforce_identity_maps));
+      *converter, sign_converter, context, enforce_identity_maps);
   patterns->insert<HloToMemrefDynamicReshapeConverter,
                    HloToMemrefReshapeUnrankedConverter>(
       *converter, sign_converter, context);

@@ -17,6 +17,7 @@ package_group(
         "//tensorflow/core/tfrt/eager/...",
         "//tensorflow/core/tfrt/experimental/data/...",
         "//tensorflow/core/tfrt/saved_model/...",
+        "//tensorflow/core/tfrt/graph_executor/...",
     ] + if_google([
         "//learning/brain/experimental/mlir/tflite/tfmrt/...",
         "//learning/brain/experimental/mlir/tfrt_compiler/...",
@@ -70,9 +71,11 @@ tfrt_cc_library(
     hdrs = ["jit/opdefs/tf_cpurt_ops.h"],
     deps = [
         ":tf_cpurt_ops_inc_gen",
+        "//tensorflow/compiler/mlir/tensorflow:tensorflow_ops",
         "//tensorflow/core/runtime_fallback/opdefs:tfrt_fallback_opdefs",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:SideEffects",
+        "@llvm-project//mlir:StandardOps",
         "@tf_runtime//:basic_kernels_opdefs",
         "@tf_runtime//:compiler_tfrt_op_interfaces",
         "@tf_runtime//:compiler_tfrt_traits",
@@ -447,6 +450,7 @@ cc_library(
         # copybara:uncomment "//learning/brain/experimental/tfrt/visualization:__pkg__",
         "//tensorflow/compiler/mlir/tfrt/tests/saved_model:__pkg__",
         "//tensorflow/core/tfrt/eager:__pkg__",
+        "//tensorflow/core/tfrt/graph_executor:__pkg__",
         "//tensorflow/core/tfrt/saved_model:__pkg__",
         "@tf_runtime//:__subpackages__",
     ],
@@ -674,7 +678,7 @@ tf_cc_binary(
     deps = [
         ":tf_cpurt_kernels_alwayslink",
         "@tf_runtime//:dtype",
-        "@tf_runtime//:simple_tracing_sink_alwayslink",
+        "@tf_runtime//:simple_tracing_sink",
         "@tf_runtime//tools:bef_executor_expensive_kernels",
         "@tf_runtime//tools:bef_executor_jit_kernels",
         "@tf_runtime//tools:bef_executor_lib",

@@ -52,11 +52,16 @@ def LinalgTrivialCopyRemoval
   }];
 }
 
-def CodegenCWise : FunctionPass<"tf-cpurt-codegen-cwise"> {
+def TileCWise : FunctionPass<"tf-cpurt-tile-cwise"> {
   let summary = "Tile elementwise ops on tensors";
-  let constructor = "tensorflow::CreateCodegenStrategyForCWisePass()";
-  let dependentDialects = [
-    "mlir::linalg::LinalgDialect",
+  let constructor = "tensorflow::CreateTileCWisePass()";
+
+  let dependentDialects = ["mlir::linalg::LinalgDialect"];
+
+  let options = [
+    Option<"cwise_tile_size", "cwise-tile-size",
+           "int64_t", /*default=*/"8",
+           "Tile size for the innermost dimension of an elementwise op.">,
   ];
 }
 
@@ -68,9 +73,9 @@ def PeelTiledLoops : FunctionPass<"tf-cpurt-peel-tiled-loops"> {
   ];
 }
 
-def CodegenReduction : FunctionPass<"tf-cpurt-codegen-reduction"> {
+def TileReduction : FunctionPass<"tf-cpurt-tile-reduction"> {
   let summary = "Tile and fuse linalg.generic reduction on tensors.";
-  let constructor = "tensorflow::CreateCodegenStrategyForReductionPass()";
+  let constructor = "tensorflow::CreateTileReductionPass()";
   let dependentDialects = [
     "mlir::linalg::LinalgDialect",
     "mlir::memref::MemRefDialect",
@@ -80,6 +85,26 @@ def CodegenReduction : FunctionPass<"tf-cpurt-codegen-reduction"> {
   let description = [{
     Matches linalg.generic to understand whether it is a reduction or not.
     After that performs tiling for vectorization and fusion of producers.
+  }];
+
+  let options = [
+    Option<"reduction_1d_tile_size", "reduction-1d-tile-size",
+           "int64_t", /*default=*/"8", "Tile size for a 1D reduction.">,
+    ListOption<"reduction_2d_tile_sizes", "reduction-2d-tile-sizes", "int64_t",
+               "Tile sizes for a 2D reduction.",
+               "llvm::cl::MiscFlags::CommaSeparated">,
+  ];
+}
+
+def FuseFillIntoTiledReduction
+    : FunctionPass<"tf-cpurt-fuse-fill-into-tiled-reduction"> {
+  let summary = "Fuse `linalg.fill` into `linalg.tiled_loop` with a reduction.";
+  let constructor = "tensorflow::CreateFuseFillIntoTiledReductionPass()";
+  let dependentDialects = ["mlir::linalg::LinalgDialect"];
+
+  let description = [{
+    Fuses `linalg.fill` producers of output tensor arguments into
+    `linalg.tiled_loop`.
   }];
 }
 
@@ -188,10 +213,4 @@ def MathApproximation : FunctionPass<"tf-cpurt-math-approximation"> {
               "all supported math operations.",
               "llvm::cl::MiscFlags::CommaSeparated">,
   ];
-}
-
-def SinkUnusedOutputs : FunctionPass<"tf-cpurt-sink-unused-outputs"> {
-  let summary = "Sink unused output args of `tiled_loop` into the loop body.";
-  let constructor = "tensorflow::CreateSinkUnusedOutputs()";
-  let dependentDialects = ["mlir::linalg::LinalgDialect"];
 }

@@ -21,7 +21,6 @@ limitations under the License.
 #include <functional>
 #include <random>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #include "absl/strings/str_cat.h"
@@ -321,13 +320,13 @@ Layout CreateDefaultLayoutForRank(int64_t rank) {
 /* static */ absl::Span<const int64_t> LayoutUtil::MinorToMajor(
     const Shape& shape) {
   CHECK(IsDenseArray(shape));
-  return AsInt64Slice(shape.layout().minor_to_major());
+  return shape.layout().minor_to_major();
 }
 
 /* static */ absl::Span<const int64_t> LayoutUtil::MinorToMajor(
     const Layout& layout) {
   CHECK(layout.format() == DENSE);
-  return AsInt64Slice(layout.minor_to_major());
+  return layout.minor_to_major();
 }
 
 /* static */ int64_t LayoutUtil::Major(const Layout& layout,
@@ -357,7 +356,7 @@ Layout CreateDefaultLayoutForRank(int64_t rank) {
   return logical_to_physical;
 }
 
-/* static */ string LayoutUtil::HumanString(const Layout& layout) {
+/* static */ std::string LayoutUtil::HumanString(const Layout& layout) {
   return layout.ToString();
 }
 

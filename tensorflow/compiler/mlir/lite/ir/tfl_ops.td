@@ -676,7 +676,8 @@ def TFL_TransposeConvOp: TFL_Op<"transpose_conv", [
     AffineQuantizedOpInterface, AffineOpCoefficient<0, 1>,
     QuantizableResult,
     TFL_SparseOp,
-    DeclareOpInterfaceMethods<TFL_ArithmeticCount>]> {
+    DeclareOpInterfaceMethods<TFL_ArithmeticCount>,
+    DynamicRangeQuantizedOpInterface]> {
   let summary = "Transpose convolution operator";
 
   let description = [{
@@ -707,6 +708,8 @@ def TFL_TransposeConvOp: TFL_Op<"transpose_conv", [
     std::vector<int> GetSparseOperands() { return {1}; }
     std::vector<std::vector<int>> GetFloatBlockSize() { return {}; }
     std::vector<std::vector<int>> GetQuantizedBlockSize() { return {}; }
+    // DynamicRangeQuantizedOpInterface:
+    std::vector<int> GetQuantizableOperandIndices() { return {1}; }
   }];
 }
 
@@ -748,7 +751,7 @@ def TFL_ArgMaxOp : TFL_Op<"arg_max", [
   }];
 
   let arguments = (
-    ins TFL_TensorOf<[F32, I32, I8, UI8, QI8, QUI8]>:$input,
+    ins TFL_TensorOf<[I1, F32, I32, I8, UI8, QI8, QUI8]>:$input,
     TFL_I32OrI64Tensor:$dim
   );
 
@@ -780,7 +783,7 @@ def TFL_ArgMinOp : TFL_Op<"arg_min", [
   }];
 
   let arguments = (
-    ins TFL_TensorOf<[F32, I32, I8, UI8, QI8, QUI8]>:$input,
+    ins TFL_TensorOf<[I1, F32, I32, I8, UI8, QI8, QUI8]>:$input,
     TFL_I32OrI64Tensor:$dim
   );
 
@@ -1149,7 +1152,8 @@ def TFL_GatherOp : TFL_Op<"gather", [
     SameOperandsAndResultsScale,
     TFL_OperandHasAtleastRank<0, 1>,
     PredOpTrait<"params and output must have same element type",
-      TFL_TCresVTEtIsSameAsOp<0, 0>>
+      TFL_TCresVTEtIsSameAsOp<0, 0>>,
+    DynamicRangeQuantizedOpInterface
   ]> {
   let summary = "Gather operator";
 
@@ -1177,6 +1181,11 @@ def TFL_GatherOp : TFL_Op<"gather", [
   let hasOptions = 1;
 
   let verifier = [{ return Verify(*this); }];
+
+  let extraClassDeclaration = [{
+    // DynamicRangeQuantizedOpInterface:
+    std::vector<int> GetQuantizableOperandIndices() { return {0}; }
+  }];
 }
 
 def TFL_GatherNdOp : TFL_Op<"gather_nd", [
@@ -1575,7 +1584,9 @@ def TFL_EmbeddingLookupOp: TFL_Op<"embedding_lookup",
      PredOpTrait<"value and output must have same element type",
        TFL_TCresVTEtIsSameAsOp<0, 1>>,
      TFL_OperandHasRank<0, 1>,
-     TFL_OperandHasRankAtLeast<1, 2>
+     TFL_OperandHasRankAtLeast<1, 2>,
+     DynamicRangeQuantizedOpInterface,
+     QuantizableResult
     ]> {
   let summary = "Embedding lookup operator";
 
@@ -1589,6 +1600,11 @@ def TFL_EmbeddingLookupOp: TFL_Op<"embedding_lookup",
    );
 
   let results = (outs TFL_TensorOf<[F32, I8, UI8]>:$output);
+
+  let extraClassDeclaration = [{
+    // DynamicRangeQuantizedOpInterface:
+    std::vector<int> GetQuantizableOperandIndices() { return {1}; }
+  }];
 }
 
 def TFL_EqualOp: TFL_Op<"equal", [
@@ -5354,7 +5370,7 @@ or unnormalized log-probabilities provided for all classes.
   );
 
   let results = (outs
-    TFL_TensorOf<[I64]>:$out);
+    TFL_TensorOf<[I32, I64]>:$out);
 
   let hasOptions = 1;
   let customOption = "RandomOptions";
