@@ -903,6 +903,40 @@ def _get_engine_dtypes_from_node(node, key):
   return [dtypes._TYPE_TO_STRING[dtype] for dtype in node.attr[key].list.type]
 
 
+def _construct_function_from_graph_def(func, graph_def):
+    """Rebuild function from graph_def."""
+    # Remove the original function from the context
+    for f in graph_def.library.function:
+      while context.context().has_function(f.signature.name):
+        context.context().remove_function(f.signature.name)
+
+    # TODO: less assumptions about captures being the same as original function?
+    captures = {
+      t2.name.split(":")[0]: t1
+      for _, (t1, t2) in func.graph._captures.items()}
+    new_func = wrap_function.function_from_graph_def(
+        graph_def, [tensor.name for tensor in func.inputs],
+        [tensor.name for tensor in func.outputs], captures)
+    new_func.graph.structured_outputs = nest.pack_sequence_as(
+        func.graph.structured_outputs, new_func.graph.structured_outputs)
+
+    # Copy structured input signature from original function (used during
+    # serialization)
+    new_func.graph.structured_input_signature = (
+        func.structured_input_signature)
+
+    # Manually propagate shape for input tensors where the shape is not correctly
+    # propagated. Scalars shapes are lost when wrapping the function.
+    # TODO: is this step actually necessary?
+    inputs_map = {
+        tensor.name: tensor for tensor in func.inputs
+    }
+    for input_tensor in new_func.inputs:
+      input_tensor.set_shape(inputs_map[input_tensor.name].shape)
+
+    return new_func
+
+
 @tf_export("experimental.tensorrt.Converter", v1=[])
 class TrtGraphConverterV2(object):
   """An offline converter for TF-TRT transformation for TF 2.0 SavedModels.
@@ -1156,19 +1190,6 @@ class TrtGraphConverterV2(object):
         if node.op == _TRT_ENGINE_OP_NAME:
           fn(node)
 
-  def _rebuild_func(self, func):
-    """Rebuild function from graph_def."""
-    rebuilt_func = wrap_function.function_from_graph_def(
-        self._converted_graph_def, [tensor.name for tensor in func.inputs],
-        [tensor.name for tensor in func.outputs])
-    rebuilt_func.graph.structured_outputs = nest.pack_sequence_as(
-        func.graph.structured_outputs, rebuilt_func.graph.structured_outputs)
-    # Copy structured input signature from original function (used during
-    # serialization)
-    rebuilt_func.graph.structured_input_signature = (
-        func.structured_input_signature)
-    return rebuilt_func
-
   # TODO(laigd): provide a utility function to optimize a ConcreteFunction and
   # use it here (b/124792963).
   def convert(self, calibration_input_fn=None):
@@ -1203,8 +1224,7 @@ class TrtGraphConverterV2(object):
       graph_def = convert_to_constants._run_inline_graph_optimization(
         func, lower_control_flow, aggressive_inlining)
 
-      return convert_to_constants._construct_concrete_function(
-        func_in, graph_def, set())
+      return _construct_function_from_graph_def(func_in, graph_def)
 
     self._saved_model = load.load(self._input_saved_model_dir,
                                   self._input_saved_model_tags)
@@ -1213,6 +1233,7 @@ class TrtGraphConverterV2(object):
     frozen_func = _apply_inline_opt(func)
     grappler_meta_graph_def = saver.export_meta_graph(
         graph_def=frozen_func.graph.as_graph_def(), graph=frozen_func.graph)
+    # TODO: do we actually need to reconstruct a function at this point?
 
     # Add a collection 'train_op' so that Grappler knows the outputs.
     fetch_collection = meta_graph_pb2.CollectionDef()
@@ -1223,27 +1244,8 @@ class TrtGraphConverterV2(object):
 
     # Run TRT optimizer in Grappler to convert the graph.
     self._converted_graph_def = self._run_conversion(grappler_meta_graph_def)
-    # If a function is converted, then the TF context contains the original
-    # function while the converted_graph_def contains the converted function.
-    # Remove the original function from the TF context in this case.
-    for f in self._converted_graph_def.library.function:
-      while context.context().has_function(f.signature.name):
-        logging.info("Removing original function %s from the context",
-                     f.signature.name)
-        context.context().remove_function(f.signature.name)
-    # This also adds the converted functions to the context.
-    self._converted_func = wrap_function.function_from_graph_def(
-        self._converted_graph_def,
-        [tensor.name for tensor in frozen_func.inputs],
-        [tensor.name for tensor in frozen_func.outputs])
-    # Reconstruct the output signatures using the ones from original model.
-    self._converted_func.graph.structured_outputs = nest.pack_sequence_as(
-        func.graph.structured_outputs,
-        self._converted_func.graph.structured_outputs)
-    # Copy structured input signature from original function (used during
-    # serialization)
-    self._converted_func.graph.structured_input_signature = (
-        func.structured_input_signature)
+    self._converted_func = _construct_function_from_graph_def(
+      frozen_func, self._converted_graph_def)
 
     if self._need_calibration:
       for inp in calibration_input_fn():
@@ -1262,7 +1264,8 @@ class TrtGraphConverterV2(object):
                               _save_calibration_table)
 
       # Rebuild the function since calibration has changed the graph.
-      self._converted_func = self._rebuild_func(self._converted_func)
+      self._converted_func = _construct_function_from_graph_def(
+          self._converted_func, self._converted_graph_def)
 
     self._converted = True
     return self._converted_func
@@ -1303,7 +1306,8 @@ class TrtGraphConverterV2(object):
       # Profile generation is enabled using the _profile_generation_mode
       # attribute of the TRTEngineOps. We need to rebuild the function to
       # change this attribute.
-      func = self._rebuild_func(self._converted_func)
+      func = _construct_function_from_graph_def(
+          self._converted_func, self._converted_graph_def)
     else:
       func = self._converted_func
 
