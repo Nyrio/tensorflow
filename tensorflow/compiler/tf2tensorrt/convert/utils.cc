@@ -167,6 +167,8 @@ Status TfTypeToTrtType(DataType tf_type, nvinfer1::DataType* trt_type) {
     case DT_INT32:
       *trt_type = nvinfer1::DataType::kINT32;
       break;
+    // case DT_RESOURCE:
+      /// TODO: figure this out
     default:
       return errors::InvalidArgument("Unsupported tensorflow data type ",
                                      DataTypeString(tf_type));

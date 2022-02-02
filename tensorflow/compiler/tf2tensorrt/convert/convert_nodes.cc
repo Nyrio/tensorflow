@@ -405,6 +405,11 @@ Status GetTrtBroadcastShape(const TRT_TensorOrWeights& operand_l,
                                  int broadcast_num_dims, int* output_dims_array,
                                  nvinfer1::Dims* output_dims) {
     const nvinfer1::Dims input_dims = input.GetTrtDims();
+    if(input_dims.nbDims < 0) {
+      /// TODO: did we do something wrong upstream of this point?
+      return errors::InvalidArgument("Invalid input dims:",
+                                     DebugString(input_dims));
+    }
     std::fill(output_dims_array, output_dims_array + max_nb_dims, 1);
     std::copy(input_dims.d, input_dims.d + input_dims.nbDims,
               output_dims_array + broadcast_num_dims - input_dims.nbDims);
@@ -996,6 +1001,17 @@ StatusOr<OpConverter> TrtNodeValidator::GetValidator(const std::string& op) {
 Status TrtNodeValidator::ConvertToTensorOrWeights(
     const NodeDef& node_def, int output_port,
     TRT_TensorOrWeights* tensor_or_weights) {
+  TFAttrs attrs(node_def);
+
+  // Treat handles separately.
+  if (node_def.op() == "VarHandleOp"
+     || (node_def.op() == "Placeholder"
+         && attrs.get<DataType>("dtype") == DataType::DT_RESOURCE)) {
+    ResourceHandle fake_resource;
+    *tensor_or_weights = TRT_TensorOrWeights(fake_resource);
+    return Status::OK();
+  }
+
   // The output of the conversion will be used as input to other nodes to
   // determine whether TRT supports those nodes. If it cannot convert the
   // Const, it's very likely we cannot treat it as a tensor and make it an
@@ -1019,6 +1035,12 @@ Status TrtNodeValidator::ConvertToTensorOrWeights(
     std::vector<TRT_TensorOrWeights> inputs;
     return ConvertVariableToWeights(node_def, inputs, tensor_or_weights);
   }
+  // else if (node_def.op() == "VarHandleOp" ||
+  //            (node_def.op() == "Placeholder" &&
+  //             attrs.get<DataType>("dtype") == DataType::DT_RESOURCE)) {
+  //     std::vector<TRT_TensorOrWeights> inputs;
+  //     return ConvertVarHandleToWeights(node_def, inputs, tensor_or_weights);
+  // }
   // else if (node_def.op() == "Identity") {
   //   // TODO: refactor!
   //   if (output_port != 0) {
@@ -1046,6 +1068,7 @@ Status TrtNodeValidator::ConvertToTensorOrWeights(
   nvinfer1::DataType trt_dtype;
   nvinfer1::Dims trt_dims;
   int batch_size = -1;
+  VLOG(1) << "Dims of " << node_def.name() << ":" << shape.dims();
   TF_RETURN_IF_ERROR(ValidateTensorProperties(
       node_def.op(), dtype, shape, use_implicit_batch_,
       /*validation_only_=*/true, &trt_dtype, &trt_dims, &batch_size));
@@ -1090,12 +1113,57 @@ Status TrtNodeValidator::IsTensorRTCandidate(const Node* node) {
     }
     const NodeDef& src_def = src_node->def();
 
-    Status status = ConvertToTensorOrWeights(src_def, edge->src_output(),
-                                             &tensor_or_weights);
-    if (!status.ok()) {
-      return errors::Internal(
-          "Failed to convert input ", src_def.name(),
-          " to a TRT_TensorOrWeights: ", status.error_message());
+    // Special treatment for ReadVariableOp.
+    // TODO: refactor?
+    if(src_node->def().op() == "ReadVariableOp") {
+      Status status;
+
+      std::vector<TRT_TensorOrWeights> read_inputs;
+      ResourceHandle fake_resource;
+      read_inputs.emplace_back(fake_resource);
+
+      // Convert the variable to weights.
+      status =
+          ConvertVariableToWeights(src_def, read_inputs, &tensor_or_weights);
+      if (!status.ok()) {
+        return errors::Internal(
+            "Failed to convert variable ", src_def.name(),
+            " to a TRT_TensorOrWeights: ", status.error_message());
+      }
+
+      // // Get handle input node (VarHandleOp or Placeholder)
+      // std::vector<const Edge*> input_edges_temp;
+      // TF_RETURN_IF_ERROR(src_node->input_edges(&input_edges_temp));
+      // Node* handle_node = input_edges_temp[0]->src();
+      // const NodeDef& handle_def = handle_node->def();
+
+      // // Convert the handle to weights.
+      // std::vector<TRT_TensorOrWeights> read_inputs =
+      //     std::vector<TRT_TensorOrWeights>(1);
+      // status = ConvertToTensorOrWeights(
+      //     handle_def, input_edges_temp[0]->src_output(), &read_inputs[0]);
+      // if (!status.ok()) {
+      //   return errors::Internal(
+      //     "Failed to convert handle ", handle_def.name(),
+      //     " to a TRT_TensorOrWeights: ", status.error_message());
+      // }
+
+      // // Convert the variable to weights.
+      // status = ConvertVariableToWeights(src_def, read_inputs, &tensor_or_weights);
+      // if (!status.ok()) {
+      //   return errors::Internal(
+      //       "Failed to convert variable ", src_def.name(),
+      //       " to a TRT_TensorOrWeights: ", status.error_message());
+      // }
+    }
+    else {
+      Status status = ConvertToTensorOrWeights(src_def, edge->src_output(),
+                                              &tensor_or_weights);
+      if (!status.ok()) {
+        return errors::Internal(
+            "Failed to convert input ", src_def.name(),
+            " to a TRT_TensorOrWeights: ", status.error_message());
+      }
     }
     inputs.push_back(tensor_or_weights);
   }
@@ -1127,14 +1195,14 @@ Status TrtNodeValidator::ConvertConstToWeights(
 
 // TODO: combine with ConvertConstToWeights with boolean parameter?
 Status TrtNodeValidator::ConvertVariableToWeights(
-    const NodeDef& const_node_def,
+    const NodeDef& node_def,
     const std::vector<TRT_TensorOrWeights>& inputs,
     TRT_TensorOrWeights* output) {
   std::vector<TRT_TensorOrWeights> outputs;
-  OpConverterParams params(const_node_def, inputs, &outputs, &weight_store_,
+  OpConverterParams params(node_def, inputs, &outputs, &weight_store_,
                            precision_mode_, use_calibration_,
                            use_implicit_batch_, use_explicit_precision_);
-  auto variable_val = GetValidator("VariableV2");
+  auto variable_val = GetValidator(node_def.op());
   TF_RETURN_IF_ERROR(variable_val.status());
   Status status = (*variable_val)(&params);
   if (status.ok() && (output != nullptr)) {
@@ -1142,6 +1210,23 @@ Status TrtNodeValidator::ConvertVariableToWeights(
   }
   return status;
 }
+
+// TODO: combine with the other two somehow?
+// Status TrtNodeValidator::ConvertVarHandleToWeights(
+//     const NodeDef& node_def, const std::vector<TRT_TensorOrWeights>& inputs,
+//     TRT_TensorOrWeights* output) {
+//   std::vector<TRT_TensorOrWeights> outputs;
+//   OpConverterParams params(node_def, inputs, &outputs, &weight_store_,
+//                            precision_mode_, use_calibration_,
+//                            use_implicit_batch_, use_explicit_precision_);
+//   auto handle_val = GetValidator(node_def.op());
+//   TF_RETURN_IF_ERROR(handle_val.status());
+//   Status status = (*handle_val)(&params);
+//   if (status.ok() && (output != nullptr)) {
+//     *output = outputs[0];
+//   }
+//   return status;
+// }
 
 // static
 StatusOr<std::unique_ptr<Converter>> Converter::Create(
@@ -1263,6 +1348,18 @@ Status Converter::AddInputTensor(const string& name, nvinfer1::DataType dtype,
   if (!status.ok()) {
     return errors::CreateWithUpdatedMessage(
         status, StrCat("Failed to add input tensor ", name, ": ",
+                       status.error_message()));
+  }
+  return Status::OK();
+}
+
+Status Converter::AddInputResource(const string& name, const ResourceHandle& resource) {
+  Status status;
+  /// TODO: real value of the resource!
+  status = AddTensorOrWeights(name, TRT_TensorOrWeights(resource));
+  if (!status.ok()) {
+    return errors::CreateWithUpdatedMessage(
+        status, StrCat("Failed to add input resource ", name, ": ",
                        status.error_message()));
   }
   return Status::OK();
@@ -1904,7 +2001,7 @@ Status CheckInputsWeights(
   }
   for (int i = 0; i < inputs.size(); i++) {
     if (expected_inputs[i].second == TrtInputArg::kWeight &&
-        inputs.at(i).is_tensor()) {
+        !inputs.at(i).is_weights()) {
       return errors::Unimplemented("The input \"", expected_inputs[i].first,
                                    "\" for ", node_def.op(),
                                    " must be a constant");
@@ -1914,10 +2011,16 @@ Status CheckInputsWeights(
     // was originally a weight. We will want a caching mechanism to prevent many
     // duplicate constants from being created.
     if (expected_inputs[i].second == TrtInputArg::kTensor &&
-        inputs.at(i).is_weights()) {
+        !inputs.at(i).is_tensor()) {
       return errors::Unimplemented("The input \"", expected_inputs[i].first,
                                    "\" for ", node_def.op(),
                                    " must be a tensor");
+    }
+    if (expected_inputs[i].second == TrtInputArg::kResource &&
+        !inputs.at(i).is_resource()) {
+      return errors::Unimplemented("The input \"", expected_inputs[i].first,
+                                   "\" for ", node_def.op(),
+                                   " must be a resource handle");
     }
   }
   return Status::OK();
@@ -1941,8 +2044,18 @@ Status CheckInputsWeights(
 }
 
 Status GetNodeDefTfType(const NodeDef& node_def, DataType* tf_type,
-                        const char* type_attr_name) {
+                        const string type_attr_name_in = "") {
   TFAttrs attrs(node_def);
+  string type_attr_name;
+  if(type_attr_name_in.empty()) {
+    if (node_def.op() == "ReadVariableOp") {
+      type_attr_name = "dtype";
+    } else {
+      type_attr_name = "T";
+    }
+  } else {
+    type_attr_name = type_attr_name_in;
+  }
   if (!attrs.count(type_attr_name)) {
     return errors::InvalidArgument("Attribute with name ", type_attr_name,
                                    " not found.");
@@ -1961,15 +2074,15 @@ Status GetInputTfType(const OpConverterParams& params, DataType* tf_type,
   return inputs[pos].GetTfType(tf_type);
 }
 
-constexpr const char kOutputTypeAttrName[] = "T";
+// constexpr const char kOutputTypeAttrName[] = "T";
 
 Status GetOutputTfType(const OpConverterParams& params, DataType* tf_type) {
-  return GetNodeDefTfType(params.node_def, tf_type, kOutputTypeAttrName);
+  return GetNodeDefTfType(params.node_def, tf_type);
 }
 
 Status AllowDataTypes(const OpConverterParams& params,
                       const std::set<DataType>& allowed_types,
-                      const char* type_attr_name = kOutputTypeAttrName) {
+                      const string type_attr_name = "") {
   const auto& node_def = params.node_def;
   DataType tf_type;
   TF_RETURN_IF_ERROR(GetNodeDefTfType(node_def, &tf_type, type_attr_name));
@@ -3699,6 +3812,7 @@ Status ConvertBiasAdd(OpConverterParams* params) {
   }
 
   if (inputs[0].is_weights() && inputs[1].is_weights()) {
+    /// TODO: handle this
     return errors::InvalidArgument(
         "All inputs are weights, but Grappler is expected to fold them.");
   }
@@ -3921,6 +4035,130 @@ Status ConvertConst(OpConverterParams* params) {
   return Status::OK();
 }
 
+Status ConvertVarHandleOp(OpConverterParams* params) {
+  /// TODO: do we want to convert this? (to avoid engine inputs?)
+  /// TODO: what about Placeholder resources?
+}
+
+Status ConvertReadVariableOp(OpConverterParams* params) {
+  const auto& inputs = params->inputs;
+  const auto& node_def = params->node_def;
+
+  // Only float supported for now.
+  std::set<DataType> allowed_types{DataType::DT_FLOAT};
+  TF_RETURN_IF_ERROR(AllowDataTypes(*params, allowed_types));
+  // TODO: check that input is a resource?
+  TF_RETURN_IF_ERROR(
+      CheckInputsWeights(*params, {{"resource", TrtInputArg::kResource}}));
+
+  const TRT_TensorOrWeights& handle = inputs.at(0);
+
+  TFAttrs attrs(node_def);
+  const DataType dtype = attrs.get<DataType>("dtype");
+  const string name = node_def.name();
+
+  if (params->validation_only) {
+    const TensorShapeProto shape_proto = attrs.get<TensorShapeProto>("shape");
+    const TensorShape shape(shape_proto);
+    // TensorShape shape;
+    // TensorShape::BuildTensorShape({3, 3, 3, 3}, &shape);
+    Tensor tensor(DataType::DT_FLOAT, shape);
+    auto tensor_flat = tensor.flat<float>();
+
+    TRT_ShapedWeights weights;
+    TF_RETURN_IF_ERROR(
+        TfTensorToTrtWeights(tensor, params->weight_store, &weights));
+
+    if (params->outputs != nullptr) {
+      params->outputs->push_back(TRT_TensorOrWeights(weights));
+    }
+  } else {
+    auto ctx = params->converter->context();
+    auto lib = ctx->function_library();
+
+    // Clone function library runtime to add functions.
+    std::unique_ptr<FunctionLibraryDefinition> lib_def;
+    std::unique_ptr<ProcessFunctionLibraryRuntime> lib_pflr;
+    FunctionLibraryRuntime* lib_clone;  // TODO: destroy?
+    TF_RETURN_IF_ERROR(lib->Clone(&lib_def, &lib_pflr, &lib_clone));
+
+    // Create function definition.
+    /// TODO: does the arg name have to match the real name?
+    string func_name = name + "/func";
+    FunctionDef fdef = FunctionDefHelper::Define(
+        func_name,       // Name
+        {"in: resource"},      // Args
+        {"out: float"},  // Returns
+        {},              // Attr def
+        // Nodes
+        {{{name},
+          "ReadVariableOp",
+          {"in"}, // Name of the Placeholder or VarHandleOp
+          {{"dtype", DT_FLOAT}}},
+        {{"out"}, "Identity", {name}, {{"T", DT_FLOAT}}}});
+
+    // Add function definition to the library.
+    lib_def->AddFunctionDef(fdef);
+
+    // Instanciate function.
+    FunctionLibraryRuntime::Handle func_handle;
+    FunctionLibraryRuntime::InstantiateOptions inst_ops;
+    inst_ops.state_handle = "";
+    inst_ops.target = ctx->device()->name();
+    AttrValueMap attr_list;  // TODO: what attributes should it have?
+    TF_RETURN_IF_ERROR(lib_clone->Instantiate(func_name, AttrSlice(&attr_list),
+                                              inst_ops, &func_handle));
+
+    FunctionLibraryRuntime::Options opts;
+    opts.rendezvous = ctx->rendezvous();
+    opts.cancellation_manager = ctx->cancellation_manager();
+    opts.runner = ctx->runner();
+    /// TODO: figure out these options
+
+    // Create arg tensor and copy the handle.
+    // TensorShape handle_shape;
+    // TensorShape::BuildTensorShape({}, &handle_shape);
+    std::vector<Tensor> args;
+    args.emplace_back(handle.resource());
+
+    /// TODO: figure out whether this needs to be destroyed
+    std::vector<Tensor>* rets = new std::vector<Tensor>();
+
+    // Run the new function synchronously.
+    lib_clone->RunSync(opts, func_handle, args, rets);
+
+    // Create weights with the same shape as the output tensor.
+    Tensor tensor(DataType::DT_FLOAT, (*rets)[0].shape());
+    auto tensor_flat = tensor.flat<float>();
+
+    // Copy tensor.
+    /// TODO: figure out if tensor is on host or device?
+    const cudaStream_t* stream = CHECK_NOTNULL(
+        reinterpret_cast<const cudaStream_t*>(ctx->op_device_context()
+                                                  ->stream()
+                                                  ->implementation()
+                                                  ->GpuStreamMemberHack()));
+
+    cudaMemcpyAsync(tensor_flat.data(), rets->at(0).flat<float>().data(),
+                    rets->at(0).NumElements() * sizeof(float),
+                    cudaMemcpyDeviceToHost, *stream);
+    /// TODO: error checking
+
+    TRT_ShapedWeights weights;
+    TF_RETURN_IF_ERROR(
+        TfTensorToTrtWeights(tensor, params->weight_store, &weights));
+
+    if (params->outputs != nullptr) {
+      params->outputs->push_back(TRT_TensorOrWeights(weights));
+    }
+  }
+  return Status::OK();
+}
+
+Status ConvertResourceGather() {
+  /// TODO: How to convert this? weights + gather?
+}
+
 // TODO: use new converter interface.
 Status ConvertVariableV2(OpConverterParams* params) {
   const auto& inputs = params->inputs;
@@ -3939,7 +4177,6 @@ Status ConvertVariableV2(OpConverterParams* params) {
 
   // Create shaped weights as output.
   // TODO: non fp32 types (switch + template)
-  // TODO: run session with variable ops
   Tensor tensor(DataType::DT_FLOAT, shape);
   auto tensor_flat = tensor.flat<float>();
   if (params->validation_only) {
@@ -4002,8 +4239,6 @@ Status ConvertVariableV2(OpConverterParams* params) {
     // Run the new function synchronously.
     lib_clone->RunSync(opts, func_handle, args, rets);
 
-    VLOG(1) << "Out size: " << rets->size();
-
     // Copy tensor.
     // TODO: figure out if tensor is on host or device?
     const cudaStream_t* stream = CHECK_NOTNULL(
@@ -4055,6 +4290,7 @@ Status ConvertBinary(OpConverterParams* params) {
   TF_RETURN_IF_ERROR(AllowDataTypes(*params, allowed_types));
 
   // Constant folding should have been done by TensorFlow
+  /// TODO: remove this kind of check after adding variable support
   if (inputs.at(0).is_weights() && inputs.at(1).is_weights()) {
     return errors::Unimplemented(
         "Constant folding is falled back to TensorFlow, binary op received "
@@ -4670,8 +4906,7 @@ Status ConvertCast(OpConverterParams* params) {
   }
 
   DataType output_type;
-  TF_RETURN_IF_ERROR(GetNodeDefTfType(params->node_def, &output_type,
-                                      kCastOutputTypeAttrName));
+  TF_RETURN_IF_ERROR(GetNodeDefTfType(params->node_def, &output_type));
 
   if (output_type != DataType::DT_FLOAT) {
     return unsupport_cast_error(
@@ -6924,6 +7159,7 @@ REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertReshape, "Reshape");
 REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertConv3D, "Conv3D");
 REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertConv3DBackpropInputV2,
                                   "Conv3DBackpropInputV2");
+REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertReadVariableOp, "ReadVariableOp");
 REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertResize, "ResizeBilinear");
 REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertResize, "ResizeNearestNeighbor");
 REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertPool3D, "AvgPool3D");
@@ -7021,28 +7257,36 @@ Status ConvertGraphDefToEngine(
             "Node ", node_name,
             " with is neither Placeholder nor Arg, instead ", node_def.op());
       }
-      nvinfer1::DataType trt_dtype;
-      nvinfer1::Dims trt_dims;
-      int batch_size = -1;
-      auto shape = input_shapes.at(slot_number);
-      auto status = ValidateTensorProperties(
-          node_def.op(), node_def.attr().at(type_key).type(), shape,
-          use_implicit_batch, /*validation_only=*/false, &trt_dtype, &trt_dims,
-          &batch_size);
-      if (!status.ok()) {
-        const string error_message =
-            StrCat("Validation failed for ", node_name, " and input slot ",
-                   slot_number, ": ", status.error_message());
-        LOG_WARNING_WITH_PREFIX << error_message;
-        return errors::CreateWithUpdatedMessage(status, error_message);
+      DataType tf_dtype = node_def.attr().at(type_key).type();
+      if(tf_dtype == DT_RESOURCE) {
+        VLOG(2) << "Adding engine input resource " << node_name;
+        /// TODO: figure out static case
+        TF_RETURN_IF_ERROR(converter->AddInputResource(
+            node_name, ctx->input(slot_number).flat<ResourceHandle>()(0)));
+      } else {
+        nvinfer1::DataType trt_dtype;
+        nvinfer1::Dims trt_dims;
+        int batch_size = -1;
+        auto shape = input_shapes.at(slot_number);
+        auto status = ValidateTensorProperties(
+            node_def.op(), node_def.attr().at(type_key).type(), shape,
+            use_implicit_batch, /*validation_only=*/false, &trt_dtype,
+            &trt_dims, &batch_size);
+        if (!status.ok()) {
+          const string error_message =
+              StrCat("Validation failed for ", node_name, " and input slot ",
+                    slot_number, ": ", status.error_message());
+          LOG_WARNING_WITH_PREFIX << error_message;
+          return errors::CreateWithUpdatedMessage(status, error_message);
+        }
+        VLOG(2) << "Adding engine input tensor " << node_name << " with shape "
+                << DebugString(trt_dims);
+        // TODO(laigd): the conversion should always happen at runtime where all
+        // the shapes are known, and we can provide a mode to generate the
+        // engines offline, by calling sess.run() and cache/serialize the engines.
+        TF_RETURN_IF_ERROR(converter->AddInputTensor(node_name, trt_dtype,
+                                                    trt_dims, batch_size));
       }
-      VLOG(2) << "Adding engine input tensor " << node_name << " with shape "
-              << DebugString(trt_dims);
-      // TODO(laigd): the conversion should always happen at runtime where all
-      // the shapes are known, and we can provide a mode to generate the
-      // engines offline, by calling sess.run() and cache/serialize the engines.
-      TF_RETURN_IF_ERROR(converter->AddInputTensor(node_name, trt_dtype,
-                                                   trt_dims, batch_size));
     } else if (IsEngineOutput(node_name)) {
       int32 slot_number = -1;
       if (node_def.op() == "Identity") {
@@ -7063,7 +7307,14 @@ Status ConvertGraphDefToEngine(
       }
       // Get output type that TensorFlow expects
       TFAttrs attrs(node_def);
-      DataType tf_dtype = attrs.get<DataType>("T");
+      string out_type_key;
+      if (node_def.op() == "ReadVariableOp") {
+        out_type_key = "dtype";
+      }
+      else {
+        out_type_key = "T";
+      }
+      DataType tf_dtype = attrs.get<DataType>(out_type_key);
       nvinfer1::DataType trt_dtype;
       TF_RETURN_IF_ERROR(TfTypeToTrtType(tf_dtype, &trt_dtype));
       if (output_tensors.size() <= slot_number) {

@@ -314,7 +314,7 @@ def _get_tensorrt_rewriter_config(conversion_params,
     # Layout optimizer may add Const nodes followed by Reshape nodes, thus we
     # need to run constant folding again.
     rewriter_config_with_trt.optimizers.extend(
-        ["constfold", "layout", "constfold"])
+        ["function", "constfold", "layout", "constfold"])
 
   rewriter_config_with_trt.meta_optimizer_iterations = (
       rewriter_config_pb2.RewriterConfig.ONE)
@@ -1222,18 +1222,46 @@ class TrtGraphConverterV2(object):
       aggressive_inlining = False
 
       graph_def = convert_to_constants._run_inline_graph_optimization(
-        func, lower_control_flow, aggressive_inlining)
+        func_in, lower_control_flow, aggressive_inlining)
+
+      # Annotate ReadVariableOp with shape
+      # TODO: separate function?
+      ph_shape_map = {}
+      for ph, var in zip (func_in.graph.internal_captures, func_in.variables):
+          ph_shape_map[ph.name] = var.shape
+      # Construct a mapping of node names to nodes
+      # TODO: better way?
+      name_to_node = {node.name: node for node in graph_def.node}
+      # Go through all the ReadVariableOp nodes in the graph def
+      for node in graph_def.node:
+        if node.op == "ReadVariableOp":
+          node_ = node
+          # Go up the chain of identities to find a placeholder
+          # TODO: what if we don't find a placeholder?
+          while name_to_node[node_.input[0]].op == "Identity":
+            node_ = name_to_node[node_.input[0]]
+          shape = ph_shape_map[node_.input[0] + ":0"]
+          print(f"Op {node.name} has shape {shape}")
+          node.attr["shape"].shape.CopyFrom(shape.as_proto())
 
       return _construct_function_from_graph_def(func_in, graph_def)
+
+    # saved_model = saved_model_pb2.SavedModel()
+    # with open(self._input_saved_model_dir + "/saved_model.pb", "rb") as f:
+    #     file_content = f.read()
+    # saved_model.ParseFromString(file_content)
 
     self._saved_model = load.load(self._input_saved_model_dir,
                                   self._input_saved_model_tags)
     func = self._saved_model.signatures[self._input_saved_model_signature_key]
+
     # frozen_func = convert_to_constants.convert_variables_to_constants_v2(func)
     frozen_func = _apply_inline_opt(func)
+    # TODO: do we actually need to reconstruct a function at this point?
     grappler_meta_graph_def = saver.export_meta_graph(
         graph_def=frozen_func.graph.as_graph_def(), graph=frozen_func.graph)
-    # TODO: do we actually need to reconstruct a function at this point?
+
+    # grappler_meta_graph_def = saved_model.meta_graphs[0]
 
     # Add a collection 'train_op' so that Grappler knows the outputs.
     fetch_collection = meta_graph_pb2.CollectionDef()
