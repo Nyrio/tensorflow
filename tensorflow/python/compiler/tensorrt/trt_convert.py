@@ -1234,22 +1234,16 @@ class TrtGraphConverterV2(object):
       name_to_node = {node.name: node for node in graph_def.node}
       # Go through all the ReadVariableOp nodes in the graph def
       for node in graph_def.node:
-        if node.op == "ReadVariableOp":
+        if node.op == "ReadVariableOp" or node.op == "ResourceGather":
           node_ = node
           # Go up the chain of identities to find a placeholder
           # TODO: what if we don't find a placeholder?
           while name_to_node[node_.input[0]].op == "Identity":
             node_ = name_to_node[node_.input[0]]
           shape = ph_shape_map[node_.input[0] + ":0"]
-          print(f"Op {node.name} has shape {shape}")
           node.attr["shape"].shape.CopyFrom(shape.as_proto())
 
       return _construct_function_from_graph_def(func_in, graph_def)
-
-    # saved_model = saved_model_pb2.SavedModel()
-    # with open(self._input_saved_model_dir + "/saved_model.pb", "rb") as f:
-    #     file_content = f.read()
-    # saved_model.ParseFromString(file_content)
 
     self._saved_model = load.load(self._input_saved_model_dir,
                                   self._input_saved_model_tags)
@@ -1260,8 +1254,6 @@ class TrtGraphConverterV2(object):
     # TODO: do we actually need to reconstruct a function at this point?
     grappler_meta_graph_def = saver.export_meta_graph(
         graph_def=frozen_func.graph.as_graph_def(), graph=frozen_func.graph)
-
-    # grappler_meta_graph_def = saved_model.meta_graphs[0]
 
     # Add a collection 'train_op' so that Grappler knows the outputs.
     fetch_collection = meta_graph_pb2.CollectionDef()

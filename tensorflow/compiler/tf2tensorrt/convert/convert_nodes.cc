@@ -1068,10 +1068,11 @@ Status TrtNodeValidator::ConvertToTensorOrWeights(
   nvinfer1::DataType trt_dtype;
   nvinfer1::Dims trt_dims;
   int batch_size = -1;
-  VLOG(1) << "Dims of " << node_def.name() << ":" << shape.dims();
+  /// TODO: remove this debug log.
   TF_RETURN_IF_ERROR(ValidateTensorProperties(
       node_def.op(), dtype, shape, use_implicit_batch_,
       /*validation_only_=*/true, &trt_dtype, &trt_dims, &batch_size));
+    VLOG(1) << "Dims of " << node_def.name() << ":" << DebugString(trt_dims);
 
   // Adds a fake ITensor. This is fine since op converter operates in
   // validation-only mode and it won't (and shouldn't) use the tensor to do
@@ -2307,6 +2308,7 @@ Status ConvertConv2DHelper(OpConverterParams* params, int group,
   }
   // Channel dim must be static for DepthwiseConv2dNative since we use that
   // value for num_groups at build time.
+  VLOG(2) << "Dimensions:" << DebugString(tensor->getDimensions()) << " ; c_index: " << c_index;
   if (!params->use_implicit_batch && tensor->getDimensions().d[c_index] == -1) {
     return errors::InvalidArgument("Channel dimension must be static");
   }
@@ -4213,6 +4215,7 @@ Status ConvertVariableV2(OpConverterParams* params) {
            {"shape", shape_proto},
            {"shared_name", shared_name}}},
          {{"out"}, "Identity", {name}, {{"T", DT_FLOAT}}}});
+    /// TODO: container?
 
     // Add function definition to the library.
     lib_def->AddFunctionDef(fdef);
@@ -7267,6 +7270,14 @@ Status ConvertGraphDefToEngine(
         nvinfer1::DataType trt_dtype;
         nvinfer1::Dims trt_dims;
         int batch_size = -1;
+        // VLOG(2) << "input_shapes size: "
+        //         << input_shapes.size();
+        // VLOG(2) << "profile.input_shapes_ dims: "
+        //         << profiles->input_shapes_.size() << " " << profiles->input_shapes_[0].size();
+        // VLOG(2) << "profile.input_shape_values_ dims: "
+        //         << profiles->input_shape_values_.size() << " " << profiles->input_shape_values_[0].size();
+        // VLOG(2) << "profile.actual_shape_values_ dims: "
+        //         << profiles->actual_shape_values_.size();
         auto shape = input_shapes.at(slot_number);
         auto status = ValidateTensorProperties(
             node_def.op(), node_def.attr().at(type_key).type(), shape,
@@ -7487,12 +7498,14 @@ Status ConvertSegmentToGraphDef(
                   << " from subgraph.";
           ++input_idx;
           continue;
-        } else {
-          return errors::InvalidArgument(
-              "Found non control input outside the segment that is not an "
-              "engine connection to ",
-              snode->name(), ": ", input.first);
         }
+        /// TODO: throw error when it's not a resource input.
+        // else {
+        //   return errors::InvalidArgument(
+        //       "Found non control input outside the segment that is not an "
+        //       "engine connection to ",
+        //       snode->name(), ": ", input.first);
+        // }
       }
       if (actual_input_idx != input_idx) {
         snode->set_input(actual_input_idx, snode->input(input_idx));
