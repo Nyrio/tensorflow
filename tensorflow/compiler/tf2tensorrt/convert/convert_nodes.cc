@@ -2049,7 +2049,8 @@ Status GetNodeDefTfType(const NodeDef& node_def, DataType* tf_type,
   TFAttrs attrs(node_def);
   string type_attr_name;
   if(type_attr_name_in.empty()) {
-    if (node_def.op() == "ReadVariableOp") {
+    if (node_def.op() == "ReadVariableOp" ||
+        node_def.op() == "ResourceGather") {
       type_attr_name = "dtype";
     } else {
       type_attr_name = "T";
@@ -4037,9 +4038,204 @@ Status ConvertConst(OpConverterParams* params) {
   return Status::OK();
 }
 
-Status ConvertVarHandleOp(OpConverterParams* params) {
-  /// TODO: do we want to convert this? (to avoid engine inputs?)
-  /// TODO: what about Placeholder resources?
+Status ConvertResourceGather(OpConverterParams* params) {
+  /// TODO: Refactor to share code with ReadVariableOp and GatherV2!!
+
+  const auto& inputs = params->inputs;
+  const auto& node_def = params->node_def;
+
+  TF_RETURN_IF_ERROR(
+      CheckInputsWeights(*params, {{"resource", TrtInputArg::kResource},
+                                   {"indices", TrtInputArg::kBoth}}));
+
+  // Only float supported for now.
+  std::set<DataType> allowed_types{DataType::DT_FLOAT};
+  TF_RETURN_IF_ERROR(AllowDataTypes(*params, allowed_types));
+
+  const TRT_TensorOrWeights& handle = inputs.at(0);
+  const auto& indices_input = inputs.at(1);
+
+  TF_RETURN_IF_ERROR(AllowDataTypes(*params, {DataType::DT_INT32},
+                                    /*dtype_attr_name=*/"Tindices"));
+  
+  // ResourceGather doesn't have an axis attribute like GatherV2.
+  int trt_axis = 0;
+
+  /// TODO: do we need any such a check? Is this a possible case?
+  // if (params->use_implicit_batch && indices_input.is_weights()
+  //     && indices_input.batch_size() != 1) {
+  //   return errors::Unimplemented(
+  //       "Indices must have a batch size of 1 when indices are constants.");
+  // }
+
+  TFAttrs attrs(node_def);
+  const DataType dtype = attrs.get<DataType>("dtype");
+  const string name = node_def.name();
+  const TensorShapeProto shape_proto = attrs.get<TensorShapeProto>("shape");
+  const TensorShape shape(shape_proto);
+  nvinfer1::Dims params_dims;
+  TF_RETURN_IF_ERROR(TensorShapeToTrtDims(
+      shape, /*ignore_first_dim=*/params->use_implicit_batch,
+      &params_dims));
+
+  /// TODO: again, can indices be constant?
+  const int params_tf_rank = params_dims.nbDims;
+  const int indices_tf_rank =
+      indices_input.GetTrtDims().nbDims +
+      (params->use_implicit_batch && indices_input.is_tensor() ? 1 : 0);
+
+  const int tf_gather_output_rank = params_tf_rank + indices_tf_rank - 1;
+  if (tf_gather_output_rank >
+      nvinfer1::Dims::MAX_DIMS + (params->use_implicit_batch ? 1 : 0)) {
+    return errors::InvalidArgument(
+        "Result of gather has dimension greater than ",
+        nvinfer1::Dims::MAX_DIMS + 1);
+  }
+  if (params->validation_only) return Status::OK();
+
+  auto ctx = params->converter->context();
+  auto lib = ctx->function_library();
+
+  // Clone function library runtime to add functions.
+  std::unique_ptr<FunctionLibraryDefinition> lib_def;
+  std::unique_ptr<ProcessFunctionLibraryRuntime> lib_pflr;
+  FunctionLibraryRuntime* lib_clone;  // TODO: destroy?
+  TF_RETURN_IF_ERROR(lib->Clone(&lib_def, &lib_pflr, &lib_clone));
+
+  // Create function definition.
+  /// TODO: does the arg name have to match the real name?
+  string func_name = name + "/func";
+  FunctionDef fdef = FunctionDefHelper::Define(
+      func_name,         // Name
+      {"in: resource"},  // Args
+      {"out: float"},    // Returns
+      {},                // Attr def
+      // Nodes
+      {{{name},
+        "ReadVariableOp",
+        {"in"},  // Name of the Placeholder or VarHandleOp
+        {{"dtype", DT_FLOAT}}},
+        {{"out"}, "Identity", {name}, {{"T", DT_FLOAT}}}});
+
+  // Add function definition to the library.
+  lib_def->AddFunctionDef(fdef);
+
+  // Instanciate function.
+  FunctionLibraryRuntime::Handle func_handle;
+  FunctionLibraryRuntime::InstantiateOptions inst_ops;
+  inst_ops.state_handle = "";
+  inst_ops.target = ctx->device()->name();
+  AttrValueMap attr_list;  // TODO: what attributes should it have?
+  TF_RETURN_IF_ERROR(lib_clone->Instantiate(func_name, AttrSlice(&attr_list),
+                                            inst_ops, &func_handle));
+
+  FunctionLibraryRuntime::Options opts;
+  opts.rendezvous = ctx->rendezvous();
+  opts.cancellation_manager = ctx->cancellation_manager();
+  opts.runner = ctx->runner();
+  /// TODO: figure out these options
+
+  // Create arg tensor and copy the handle.
+  // TensorShape handle_shape;
+  // TensorShape::BuildTensorShape({}, &handle_shape);
+  std::vector<Tensor> args;
+  args.emplace_back(handle.resource());
+
+  /// TODO: figure out whether this needs to be destroyed
+  std::vector<Tensor>* rets = new std::vector<Tensor>();
+
+  // Run the new function synchronously.
+  lib_clone->RunSync(opts, func_handle, args, rets);
+
+  // Create weights with the same shape as the output tensor.
+  Tensor tensor(DataType::DT_FLOAT, (*rets)[0].shape());
+  auto tensor_flat = tensor.flat<float>();
+
+  // Copy tensor.
+  /// TODO: figure out if tensor is on host or device?
+  const cudaStream_t* stream = CHECK_NOTNULL(
+      reinterpret_cast<const cudaStream_t*>(ctx->op_device_context()
+                                                ->stream()
+                                                ->implementation()
+                                                ->GpuStreamMemberHack()));
+
+  cudaMemcpyAsync(tensor_flat.data(), rets->at(0).flat<float>().data(),
+                  rets->at(0).NumElements() * sizeof(float),
+                  cudaMemcpyDeviceToHost, *stream);
+  /// TODO: error checking
+
+  TRT_ShapedWeights weights;
+  TF_RETURN_IF_ERROR(
+      TfTensorToTrtWeights(tensor, params->weight_store, &weights));
+
+  // if (params->outputs != nullptr) {
+  //   params->outputs->push_back(TRT_TensorOrWeights(weights));
+  // }
+
+  // Convert indices to tensor if it is a constant.
+  ITensorProxyPtr indices_tensor = nullptr;
+  if (indices_input.is_weights()) {
+    indices_tensor = params->converter->CreateConstantLayer(
+        indices_input.weights(), indices_input.GetTrtDims());
+  } else {
+    indices_tensor = indices_input.tensor();
+  }
+
+  // Convert variable to tensor.
+  ITensorProxyPtr params_tensor = nullptr;
+  params_tensor = params->converter->CreateConstantLayer(
+      weights, weights.Shape());
+
+  // Note on how IGatherLayer works: if both the data and indices tensors have
+  // a batch size dimension of size N, it performs:
+  // for batchid in xrange(N):
+  //   output[batchid, a0, ..., an, i, ..., j, b0, ..., bn] = (
+  //       data[batchid, a0, ..., an, indices[batchid, i, ..., j] b0, ..., bn])
+  nvinfer1::IGatherLayer* layer = params->converter->network()->addGather(
+      *params_tensor->trt_tensor(), *indices_tensor->trt_tensor(), trt_axis);
+  TFTRT_RETURN_ERROR_IF_NULLPTR(layer, node_def.name());
+  params->converter->SetLayerName(layer, node_def);
+
+  ITensorProxyPtr output_tensor = layer->getOutput(0);
+  nvinfer1::Dims trt_gather_output_dims = output_tensor->getDimensions();
+
+  if (params->use_implicit_batch) {
+    // Note for the "- 2": one is for the output batch dim encapsulated by
+    // TF-TRT, and the other is for the output dimension that is squeezed by
+    // IGatherLayer because of the implicit batch dim in the indices (see the
+    // above note).
+    const int expected_trt_output_rank = tf_gather_output_rank -
+                                         (indices_input.is_tensor() ? 1 : 0);
+
+    if (trt_gather_output_dims.nbDims != expected_trt_output_rank) {
+      return errors::Internal(
+          "Get unexpected output dimensions of IGatherLayer. Expect nbDims: ",
+          expected_trt_output_rank,
+          ", actual nbDims: ", trt_gather_output_dims.nbDims);
+    }
+  }
+
+  // When input and indices are both constants, for the supported cases, reshape
+  // output so that after removing the implicit batch dim it will match the
+  // output shape of TF GatherV2 op.
+  if (params->use_implicit_batch &&
+      indices_input.is_weights()) {
+    for (int i = trt_axis; i < trt_gather_output_dims.nbDims - 1; ++i) {
+      trt_gather_output_dims.d[i] = trt_gather_output_dims.d[i + 1];
+    }
+
+    // Squeeze the implicit batch dimension out. Note: this works only
+    // when batch size for both inputs and indices are 1.
+    --trt_gather_output_dims.nbDims;
+
+    TF_RETURN_IF_ERROR(PrepareTensorForShape(
+        params->converter, TRT_TensorOrWeights(output_tensor),
+        trt_gather_output_dims,
+        /*validation_only=*/false, &output_tensor, node_def));
+  }
+
+  params->outputs->push_back(TRT_TensorOrWeights(output_tensor));
+  return Status::OK();
 }
 
 Status ConvertReadVariableOp(OpConverterParams* params) {
@@ -4155,10 +4351,6 @@ Status ConvertReadVariableOp(OpConverterParams* params) {
     }
   }
   return Status::OK();
-}
-
-Status ConvertResourceGather() {
-  /// TODO: How to convert this? weights + gather?
 }
 
 // TODO: use new converter interface.
@@ -7165,6 +7357,7 @@ REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertConv3DBackpropInputV2,
 REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertReadVariableOp, "ReadVariableOp");
 REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertResize, "ResizeBilinear");
 REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertResize, "ResizeNearestNeighbor");
+REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertResourceGather, "ResourceGather");
 REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertPool3D, "AvgPool3D");
 REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertPool3D, "MaxPool3D");
 REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertShape, "Shape");
@@ -7319,10 +7512,10 @@ Status ConvertGraphDefToEngine(
       // Get output type that TensorFlow expects
       TFAttrs attrs(node_def);
       string out_type_key;
-      if (node_def.op() == "ReadVariableOp") {
+      if (node_def.op() == "ReadVariableOp" ||
+          node_def.op() == "ResourceGather") {
         out_type_key = "dtype";
-      }
-      else {
+      } else {
         out_type_key = "T";
       }
       DataType tf_dtype = attrs.get<DataType>(out_type_key);
