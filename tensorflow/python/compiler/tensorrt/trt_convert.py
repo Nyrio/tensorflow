@@ -125,7 +125,8 @@ def supported_profile_strategies():
 class TrtConversionParams(
     collections.namedtuple("TrtConversionParams", [
         "max_workspace_size_bytes", "precision_mode", "minimum_segment_size",
-        "maximum_cached_engines", "use_calibration", "allow_build_at_runtime"
+        "maximum_cached_engines", "use_calibration", "allow_build_at_runtime",
+        "max_engines"
     ])):
   """Parameters that are used for TF-TRT conversion.
 
@@ -155,6 +156,8 @@ class TrtConversionParams(
       runtime if no prebuilt TensorRT engine can be found that can handle the
       given inputs during runtime, then a new TensorRT engine is built at
       runtime if allow_build_at_runtime=True, and otherwise native TF is used.
+    max_engines: Limit the number of engines to avoid generating a large
+      number of engines. The smallest engines will be discarded if necessary.
   """
 
   def __new__(cls,
@@ -163,11 +166,13 @@ class TrtConversionParams(
               minimum_segment_size=3,
               maximum_cached_engines=1,
               use_calibration=True,
-              allow_build_at_runtime=True):
+              allow_build_at_runtime=True,
+              max_engines=20):
     return super(TrtConversionParams,
                  cls).__new__(cls, max_workspace_size_bytes, precision_mode,
                               minimum_segment_size, maximum_cached_engines,
-                              use_calibration, allow_build_at_runtime)
+                              use_calibration, allow_build_at_runtime,
+                              max_engines)
 
 
 DEFAULT_TRT_CONVERSION_PARAMS = TrtConversionParams()
@@ -341,6 +346,7 @@ def _get_tensorrt_rewriter_config(conversion_params,
   optimizer.parameter_map["is_dynamic_op"].b = is_dynamic_op
   optimizer.parameter_map[
       "allow_build_at_runtime"].b = conversion_params.allow_build_at_runtime
+  optimizer.parameter_map["max_engines"].i = conversion_params.max_engines
   if max_batch_size is not None:
     optimizer.parameter_map["max_batch_size"].i = max_batch_size
   optimizer.parameter_map["use_implicit_batch"].b = use_implicit_batch
@@ -428,7 +434,8 @@ class TrtGraphConverter(object):
                minimum_segment_size=3,
                is_dynamic_op=False,
                maximum_cached_engines=1,
-               use_calibration=True):
+               use_calibration=True,
+               max_engines=20):
     """Initializes the converter.
 
     Args:
@@ -463,6 +470,9 @@ class TrtGraphConverter(object):
         will occur. Please note that accuracy may be negatively affected if
         there is a mismatch between which tensors TRT quantizes and which
         tensors were trained with fake quantization.
+      max_engines: Limit the number of engines to avoid generating a large
+        number of engines. The smallest engines will be discarded if necessary.
+        0 and negative values deactivate the limit and no engine is discarded.
 
     Raises:
       ValueError: if the combination of the parameters is invalid.
@@ -522,7 +532,8 @@ class TrtGraphConverter(object):
         minimum_segment_size=minimum_segment_size,
         maximum_cached_engines=maximum_cached_engines,
         use_calibration=use_calibration,
-        allow_build_at_runtime=True)
+        allow_build_at_runtime=True,
+        max_engines=max_engines)
     _check_conversion_params(self._conversion_params)
 
     self._test_only_disable_non_trt_optimizers = False
@@ -1034,6 +1045,7 @@ class TrtGraphConverterV2(object):
                maximum_cached_engines=1,
                use_calibration=True,
                allow_build_at_runtime=True,
+               max_engines=20,
                conversion_params=None):
     """Initialize the converter.
 
@@ -1073,6 +1085,9 @@ class TrtGraphConverterV2(object):
         runtime if no prebuilt TensorRT engine can be found that can handle the
         given inputs during runtime, then a new TensorRT engine is built at
         runtime if allow_build_at_runtime=True, and otherwise native TF is used.
+      max_engines: Limit the number of engines to avoid generating a large
+        number of engines. The smallest engines will be discarded if necessary.
+        0 and negative values deactivate the limit and no engine is discarded.
       conversion_params: a TrtConversionParams instance (deprecated).
 
     Raises:
@@ -1086,7 +1101,8 @@ class TrtGraphConverterV2(object):
           minimum_segment_size=minimum_segment_size,
           maximum_cached_engines=maximum_cached_engines,
           use_calibration=use_calibration,
-          allow_build_at_runtime=allow_build_at_runtime)
+          allow_build_at_runtime=allow_build_at_runtime,
+          max_engines=max_engines)
 
     _check_trt_version_compatibility()
     _check_conversion_params(conversion_params, is_v2=True)
@@ -1507,6 +1523,7 @@ def create_inference_graph(
     minimum_segment_size=3,
     is_dynamic_op=False,
     maximum_cached_engines=1,
+    max_engines=20,
     input_saved_model_dir=None,
     input_saved_model_tags=None,
     input_saved_model_signature_key=None,
@@ -1532,6 +1549,9 @@ def create_inference_graph(
       If the number of cached engines is already at max but none of them can
       serve the input, the TRTEngineOp will fall back to run the TF function
       based on which the TRTEngineOp is created.
+    max_engines: Limit the number of engines to avoid generating a large
+      number of engines. The smallest engines will be discarded if necessary.
+      0 and negative values deactivate the limit and no engine is discarded.
     input_saved_model_dir: the directory to load the SavedModel which contains
       the input graph to transforms. Used only when input_graph_def is None.
     input_saved_model_tags: list of tags to load the SavedModel.
@@ -1576,7 +1596,8 @@ def create_inference_graph(
       minimum_segment_size=minimum_segment_size,
       is_dynamic_op=is_dynamic_op,
       maximum_cached_engines=maximum_cached_engines,
-      use_calibration=False)
+      use_calibration=False,
+      max_engines=max_engines)
   converted_graph_def = trt_converter.convert()
   if output_saved_model_dir:
     trt_converter.save(output_saved_model_dir)

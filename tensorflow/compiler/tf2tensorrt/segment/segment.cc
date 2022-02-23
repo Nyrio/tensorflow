@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <map>
+#include <numeric>
 #include <queue>
 #include <tuple>
 #include <unordered_map>
@@ -1112,6 +1113,7 @@ Status SegmentGraph(const Graph* tf_graph,
 
   // --------------------------------- Step 3 ---------------------------------
   // Convert the segments into the expected return format
+  std::vector<int> effective_nodes_counts;
   for (const auto& itr : sg_map) {
     const string& segment_root = itr.first;
     // Return format does not require set comparator.
@@ -1141,6 +1143,45 @@ Status SegmentGraph(const Graph* tf_graph,
       continue;
     }
     segments->emplace_back(itr.second.property, segment_nodes);
+    effective_nodes_counts.push_back(num_effective_nodes);
+  }
+
+  // --------------------------------- Step 4 ---------------------------------
+  // If the number of segments exceeds max_engines, prune the smallest ones.
+  if (options.max_engines > 0 && segments->size() > options.max_engines) {
+    VLOG(1) << segments->size()
+            << " segments have more than minimum_segment_size="
+            << options.minimum_segment_size
+            << " nodes, but max_engines=" << options.max_engines
+            << ". Keeping only the largest segments.";
+
+    // Stable sort of the segment indices according to their effective sizes.
+    std::vector<int> indices(segments->size());
+    std::iota(indices.begin(), indices.end(), 0);
+    std::stable_sort(indices.begin(), indices.end(),
+                     [&effective_nodes_counts](int i1, int i2) {
+                       return effective_nodes_counts[i1] >
+                              effective_nodes_counts[i2];
+                     });
+
+    // Create a mask of segments to keep.
+    std::vector<bool> mask = std::vector<bool>(segments->size(), false);
+    for (int i = 0; i < options.max_engines; i++) {
+      mask[indices[i]] = true;
+    }
+
+    // Gather the masked elements at the start of the array, in place.
+    int j = 0;
+    for (int i = 0; i < segments->size(); i++) {
+      if(mask[i]) {
+        VLOG(1) << "segment " << i << " -> segment " << j;
+        segments->at(j) = segments->at(i);
+        j++;
+      }
+    }
+
+    // Resize the array.
+    segments->resize(options.max_engines);
   }
 
   return Status::OK();

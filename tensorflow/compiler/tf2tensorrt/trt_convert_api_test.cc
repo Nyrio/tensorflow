@@ -150,7 +150,8 @@ INSTANTIATE_TEST_CASE_P(
                       true,   // use_dynamic_shape
                       ProfileStrategy::kOptimal,
                       true,  // allow_build_at_runtime
-                      true   // convert_to_static_engine
+                      true,  // convert_to_static_engine
+                      20     // max_engines
                   },
                   {{1, 2}, {4, 2}}},
         // Implicit batch mode test with conver_to_static_engine=true.
@@ -163,7 +164,8 @@ INSTANTIATE_TEST_CASE_P(
                       false,  // use_dynamic_shape
                       ProfileStrategy::kRange,
                       true,  // allow_build_at_runtime
-                      true   // convert_to_static_engine
+                      true,  // convert_to_static_engine
+                      20     // max_engines
                   },
                   {{1, 2}}},
         // Dynamic shape mode test convert_to_static_engine=false: we cannot
@@ -179,7 +181,8 @@ INSTANTIATE_TEST_CASE_P(
                       true,   // use_dynamic_shape
                       ProfileStrategy::kOptimal,
                       true,  // allow_build_at_runtime
-                      false  // convert_to_static_engine
+                      false, // convert_to_static_engine
+                      20     // max_engines
                   },
                   {{1, 2}, {4, 2}}},
         // Implicit batch mode test with convert_to_static_engine=false. We
@@ -193,7 +196,8 @@ INSTANTIATE_TEST_CASE_P(
                       false,  // use_dynamic_shape
                       ProfileStrategy::kRange,
                       true,  // allow_build_at_runtime
-                      false  // convert_to_static_engine
+                      false, // convert_to_static_engine
+                      20     // max_engines
                   },
                   {{1, 2}, {4, 2}}}));
 

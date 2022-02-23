@@ -147,6 +147,7 @@ Status GetTrtRewriterConfig(const TfTrtConversionParams& params,
   (*trt_parameter_map)["use_implicit_batch"].set_b(!params.use_dynamic_shape);
   (*trt_parameter_map)["_allow_build_at_runtime"].set_b(
       params.allow_build_at_runtime);
+  (*trt_parameter_map)["max_engines"].set_i(params.max_engines);
   return Status::OK();
 }
 

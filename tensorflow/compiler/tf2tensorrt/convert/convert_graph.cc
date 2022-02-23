@@ -787,6 +787,7 @@ Status ConvertAfterShapes(const ConversionParams& params,
     segment_options.maximum_batch_size = params.max_batch_size;
   segment_options.allow_dynamic_non_batch_dim =
       AllowDynamicNonBatchDimension(params);
+  segment_options.max_engines = params.max_engines;
 
   segment::SegmentVector initial_segments;
   TrtNodeValidator validator(static_graph_properties, params.precision_mode,

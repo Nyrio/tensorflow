@@ -48,6 +48,8 @@ struct SegmentOptions {
   bool allow_dynamic_non_batch_dim = false;
   // The name of the device to put the segment on.
   std::set<string> exclude_node_list;
+  // Maximum desired number of engiens (smallest segments are discarded).
+  int max_engines = 20;
 };
 
 struct NodePtrCompare {

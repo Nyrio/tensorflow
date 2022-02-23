@@ -51,6 +51,7 @@ struct ConversionParams {
   ProfileStrategy profile_strategy = ProfileStrategy::kRange;
   bool allow_build_at_runtime = true;
   bool use_explicit_precision = false;
+  int max_engines = 20;
 };
 
 // Method to call from optimization pass

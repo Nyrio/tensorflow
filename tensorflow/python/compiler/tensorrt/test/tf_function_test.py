@@ -55,7 +55,8 @@ class TfFunctionTest(trt_test.TfTrtIntegrationTestBase):
         "_tftrt_use_calibration": False,
         "_tftrt_use_implicit_batch": True,
         "_tftrt_profile_strategy": self._profile_strategy,
-        "_tftrt_allow_build_at_runtime": False
+        "_tftrt_allow_build_at_runtime": False,
+        "_tftrt_max_engines": 20
     }
     self._is_v2 = False
 
@@ -189,6 +190,10 @@ class TfFunctionTest(trt_test.TfTrtIntegrationTestBase):
         func_def=func_def,
         param_name="_tftrt_allow_build_at_runtime",
         attr_value_type="b")
+    self._copy_test_attr_to_func_def(
+        func_def=func_def,
+        param_name="_tftrt_max_engines",
+        attr_value_type="i")
 
   def _MakeSavedModelV1(self, run_params):
     """Write the saved model as an input for testing.

@@ -109,6 +109,8 @@ Status UpdateFunctionSpecificConversionParams(
       ProfileStrategyFromName(profile_strategy, &cp.profile_strategy));
   TF_RETURN_IF_ERROR(GetNodeAttr(attr, "_tftrt_allow_build_at_runtime",
                                  &cp.allow_build_at_runtime));
+  TF_RETURN_IF_ERROR(
+      GetNodeAttr(attr, "_tftrt_max_engines", &cp.max_engines));
   return Status::OK();
 }
 
@@ -156,6 +158,9 @@ Status TRTOptimizationPass::Init(
   if (params.count("profile_strategy")) {
     TF_RETURN_IF_ERROR(ProfileStrategyFromName(
         params.at("profile_strategy").s(), &profile_strategy_));
+  }
+  if (params.count("max_engines")) {
+    max_engines_ = params.at("max_engines").i();
   }
   return Status::OK();
 }
@@ -343,6 +348,7 @@ Status TRTOptimizationPass::Optimize(grappler::Cluster* cluster,
   cp.profile_strategy = profile_strategy_;
   cp.allow_build_at_runtime = allow_build_at_runtime_;
   cp.use_explicit_precision = use_explicit_precision;
+  cp.max_engines = max_engines_;
 
   if (item.id != "tf_graph" && do_function_conversion) {
     const grappler::GrapplerFunctionItem& func_item =

@@ -81,6 +81,10 @@ struct TfTrtConversionParams {
   // convert_to_static_engine = false, then the converted graph_def only
   // contains placeholder TRTEngineOp nodes.
   bool convert_to_static_engine = true;
+
+  // Maximum number of TRT engines. Candidate segments are sorted by size and
+  // the smallest are discarded. 0 and negative deactivate this behavior.
+  int max_engines = 20;
 };
 
 /**
