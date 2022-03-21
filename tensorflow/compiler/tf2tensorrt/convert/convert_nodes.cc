@@ -42,6 +42,7 @@ limitations under the License.
 #include "tensorflow/compiler/tf2tensorrt/utils/trt_logger.h"
 #include "tensorflow/compiler/tf2tensorrt/utils/trt_shape_optimization_profiles.h"
 #include "tensorflow/core/common_runtime/graph_constructor.h"
+#include "tensorflow/core/common_runtime/process_function_library_runtime.h"
 #include "tensorflow/core/framework/node_def.pb.h"  // NOLINT
 #include "tensorflow/core/framework/node_def_builder.h"
 #include "tensorflow/core/framework/tensor.pb.h"  // NOLINT
@@ -63,6 +64,7 @@ limitations under the License.
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/core/platform/protobuf.h"
+#include "tensorflow/core/platform/stream_executor.h"
 #include "tensorflow/core/platform/tensor_coding.h"
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/profiler/lib/annotated_traceme.h"
@@ -851,10 +853,7 @@ StatusOr<OpConverter> TrtNodeValidator::GetValidator(const std::string& op) {
 Status TrtNodeValidator::ConvertToTensorOrWeights(
     const NodeDef& node_def, int output_port,
     TRT_TensorOrWeights* tensor_or_weights) {
-  if (node_def.op() == "Const") {
-    if (output_port != 0) {
-      return errors::InvalidArgument("Const node should only have one output.");
-    }
+  if (node_def.op() == "Const" || node_def.op() == "VariableV2") {
     // The output of the conversion will be used as input to other nodes to
     // determine whether TRT supports those nodes. If it cannot convert the
     // Const, it's very likely we cannot treat it as a tensor and make it an
@@ -862,6 +861,10 @@ Status TrtNodeValidator::ConvertToTensorOrWeights(
     // treats it as batch size. Also, it's not likely that the converter can
     // support the op, and performance may suffer even if it can, so we just
     // simply return error if the conversion fails.
+    if (output_port != 0) {
+      return errors::InvalidArgument(
+          node_def.op(), " node should only have one output.");
+    }
     std::vector<TRT_TensorOrWeights> inputs;
     return ConvertConstToWeights(node_def, inputs, tensor_or_weights);
   }
@@ -911,8 +914,16 @@ Status TrtNodeValidator::IsTensorRTCandidate(const Node* node) {
   std::vector<const Edge*> input_edges;
   TF_RETURN_IF_ERROR(node->input_edges(&input_edges));
   for (const Edge* edge : input_edges) {
+    // Go up the chain of Identity nodes.
+    Node* src_node = edge->src();
+    while (src_node->def().op() == "Identity") {
+      std::vector<const Edge*> input_edges_temp;
+      TF_RETURN_IF_ERROR(src_node->input_edges(&input_edges_temp));
+      src_node = input_edges_temp[0]->src();
+    }
+    const NodeDef& src_def = src_node->def();
+
     TRT_TensorOrWeights tensor_or_weights;
-    const NodeDef& src_def = edge->src()->def();
     Status status = ConvertToTensorOrWeights(src_def, edge->src_output(),
                                              &tensor_or_weights);
     if (!status.ok()) {
@@ -939,7 +950,7 @@ Status TrtNodeValidator::ConvertConstToWeights(
   OpConverterParams params(const_node_def, inputs, &outputs, &weight_store_,
                            precision_mode_, use_calibration_,
                            use_implicit_batch_, use_explicit_precision_);
-  auto const_val = GetValidator("Const");
+  auto const_val = GetValidator(const_node_def.op());
   TF_RETURN_IF_ERROR(const_val.status());
   Status status = (*const_val)(&params);
   if (status.ok() && (output != nullptr)) {
@@ -952,10 +963,11 @@ Status TrtNodeValidator::ConvertConstToWeights(
 StatusOr<std::unique_ptr<Converter>> Converter::Create(
     TrtPrecisionMode precision_mode, bool use_calibration,
     nvinfer1::ILogger* trt_logger, const bool use_implicit_batch,
-    absl::string_view engine_name, bool use_explicit_precision) {
-  std::unique_ptr<Converter> converter = absl::WrapUnique(
-      new Converter(precision_mode, use_calibration, trt_logger,
-                    use_implicit_batch, engine_name, use_explicit_precision));
+    absl::string_view engine_name, bool use_explicit_precision,
+    OpKernelContext* ctx) {
+  std::unique_ptr<Converter> converter = absl::WrapUnique(new Converter(
+      precision_mode, use_calibration, trt_logger, use_implicit_batch,
+      engine_name, use_explicit_precision, ctx));
   TF_RETURN_IF_ERROR(converter->Init(trt_logger));
   return converter;
 }
@@ -963,12 +975,14 @@ StatusOr<std::unique_ptr<Converter>> Converter::Create(
 Converter::Converter(TrtPrecisionMode precision_mode, bool use_calibration,
                      nvinfer1::ILogger* trt_logger,
                      const bool use_implicit_batch,
-                     absl::string_view engine_name, bool use_explicit_precision)
+                     absl::string_view engine_name, bool use_explicit_precision,
+                     OpKernelContext* ctx)
     : precision_mode_(precision_mode),
       use_calibration_(use_calibration),
       use_implicit_batch_(use_implicit_batch),
       engine_name_(engine_name),
-      use_explicit_precision_(use_explicit_precision) {
+      use_explicit_precision_(use_explicit_precision),
+      ctx_(ctx) {
   MaybeInitializeTrtPlugins(trt_logger);
 }
 
@@ -3634,6 +3648,123 @@ Status ConvertConst(OpConverterParams* params) {
   return Status::OK();
 }
 
+Status ConvertVariableV2(OpConverterParams* params) {
+  const auto& inputs = params->inputs;
+  const auto& node_def = params->node_def;
+  if (!inputs.empty()) {
+    return errors::InvalidArgument(
+        "VariableV2 node is expected to have empty input list");
+  }
+
+  DataType dtype;
+  TF_RETURN_IF_ERROR(GetNodeAttr(AttrSlice(node_def), "dtype", &dtype));
+  TensorShapeProto shape_proto;
+  TF_RETURN_IF_ERROR(GetNodeAttr(AttrSlice(node_def), "shape", &shape_proto));
+  const TensorShape shape(shape_proto);
+  string shared_name;
+  TF_RETURN_IF_ERROR(GetNodeAttr(AttrSlice(node_def), "shared_name", &shared_name));
+  string container;
+  if (!TryGetNodeAttr(AttrSlice(node_def), "container", &container))
+      container = "";
+  const string name = node_def.name();
+
+  // Create shaped weights as output.
+  // TODO: non fp32 types (switch + template)
+  Tensor tensor(DataType::DT_FLOAT, shape);
+  auto tensor_flat = tensor.flat<float>();
+  if (params->validation_only) {
+    for (int64_t i = 0; i < tensor_flat.size(); i++) {
+      tensor_flat(i) = 4;
+    }
+  } else {
+    auto ctx = params->converter->context();
+    CHECK(ctx);
+    auto lib = ctx->function_library();
+
+    // Clone function library runtime to add functions.
+    std::unique_ptr<FunctionLibraryDefinition> lib_def;
+    std::unique_ptr<ProcessFunctionLibraryRuntime> lib_pflr;
+    FunctionLibraryRuntime* lib_clone;  // TODO: destroy?
+
+    TF_RETURN_IF_ERROR(lib->Clone(&lib_def, &lib_pflr, &lib_clone));
+
+    // Create function definition.
+    string func_name = name + "/func";
+    FunctionDef fdef = FunctionDefHelper::Define(
+        func_name,       // Name
+        {},              // Args
+        {"out: float"},  // Returns
+        {},              // Attr def
+        // Nodes
+        {{{name},
+          "VariableV2",
+          {},
+          {{"dtype", DT_FLOAT},
+           {"shape", shape_proto},
+           {"container", container},
+           {"shared_name", shared_name}}},
+         {{"out"}, "Identity", {name}, {{"T", DT_FLOAT}}}});
+
+    // Add function definition to the library.
+    lib_def->AddFunctionDef(fdef);
+
+    // Instanciate function.
+    FunctionLibraryRuntime::Handle func_handle;
+    FunctionLibraryRuntime::InstantiateOptions inst_ops;
+    inst_ops.state_handle = "";
+    inst_ops.target = ctx->device()->name();
+    AttrValueMap attr_list;
+    TF_RETURN_IF_ERROR(lib_clone->Instantiate(func_name, AttrSlice(&attr_list),
+                                              inst_ops, &func_handle));
+
+    FunctionLibraryRuntime::Options opts;
+    opts.rendezvous = ctx->rendezvous();
+    opts.cancellation_manager = ctx->cancellation_manager();
+    opts.runner = ctx->runner();
+    // TODO: figure out these options
+
+    std::vector<Tensor> args;  // empty
+    // TODO: figure out why preventing this memory leak segfaults...
+    std::vector<Tensor>* rets = new std::vector<Tensor>();
+    std::unique_ptr<std::vector<Tensor>> outputs_wrapper(rets);
+
+    // Run the new function synchronously.
+    TF_RETURN_IF_ERROR(lib_clone->RunSync(opts, func_handle, args, rets));
+
+    CHECK(ctx->op_device_context());
+    CHECK(ctx->op_device_context()->stream());
+
+    // Copy tensor.
+    const cudaStream_t* stream = CHECK_NOTNULL(
+        reinterpret_cast<const cudaStream_t*>(ctx->op_device_context()
+                                                  ->stream()
+                                                  ->implementation()
+                                                  ->GpuStreamMemberHack()));
+
+    auto ret =
+        cudaMemcpyAsync(tensor_flat.data(), rets->at(0).flat<float>().data(),
+                        rets->at(0).NumElements() * sizeof(float),
+                        cudaMemcpyDeviceToHost, *stream);
+    if (ret != 0) {
+      return errors::Internal("Could not copy the variable ", name);
+    }
+    cudaStreamSynchronize(*stream);
+
+    // TODO: error checking
+
+    // TODO: remove function definition from library?
+  }
+
+  TRT_ShapedWeights weights;
+  TF_RETURN_IF_ERROR(
+      TfTensorToTrtWeights(tensor, params->weight_store, &weights));
+
+  if (params->outputs != nullptr) {
+    params->outputs->push_back(TRT_TensorOrWeights(weights));
+  }
+  return Status::OK();
+}
+
 Status ConvertIdentity(OpConverterParams* params) {
   // TODO(tmorris): TRT's Identity layer does not get optimized away as of TRT
   // 5.0, however once we know that it does it would be nice to use that
@@ -6032,6 +6163,7 @@ REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertStridedSlice, "StridedSlice");
 REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertTopK, "TopKV2");
 REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertTranspose, "Transpose");
 REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertUnpack, "Unpack");
+REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertVariableV2, "VariableV2");
 template <typename T>
 absl::InlinedVector<std::string, 10> GetOperationNames(const T& set) {
   absl::InlinedVector<std::string, 10> result;
@@ -6061,8 +6193,8 @@ REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertBatchMatMul,
                                   {"BatchMatMul", "BatchMatMulV2"});
 
 Status ConvertGraphDefToEngine(
-    const GraphDef& gdef, TrtPrecisionMode precision_mode, int max_batch_size,
-    size_t max_workspace_size_bytes,
+    const GraphDef& gdef, OpKernelContext* ctx, TrtPrecisionMode precision_mode,
+    int max_batch_size, size_t max_workspace_size_bytes,
     const std::vector<PartialTensorShape>& input_shapes,
     nvinfer1::ILogger* trt_logger, nvinfer1::IGpuAllocator* allocator,
     TRTInt8Calibrator* calibrator,
@@ -6076,7 +6208,7 @@ Status ConvertGraphDefToEngine(
   // Creating converter, TensorRT builder and network
   auto statusor = Converter::Create(precision_mode, use_calibration, trt_logger,
                                     use_implicit_batch, engine_name,
-                                    use_explicit_precision);
+                                    use_explicit_precision, ctx);
 
   TF_RETURN_IF_ERROR(statusor.status());
   std::unique_ptr<Converter> converter = std::move(statusor.ValueOrDie());

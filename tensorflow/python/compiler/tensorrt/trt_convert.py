@@ -906,6 +906,31 @@ def _get_engine_dtypes_from_node(node, key):
   return [dtypes._TYPE_TO_STRING[dtype] for dtype in node.attr[key].list.type]
 
 
+def _construct_function_from_graph_def(func, graph_def):
+  """Rebuild function from graph_def."""
+  rebuilt_func = wrap_function.function_from_graph_def(
+      graph_def, [tensor.name for tensor in func.inputs],
+      [tensor.name for tensor in func.outputs])
+  rebuilt_func.graph.structured_outputs = nest.pack_sequence_as(
+      func.graph.structured_outputs, rebuilt_func.graph.structured_outputs)
+  # Copy structured input signature from original function (used during
+  # serialization)
+  rebuilt_func.graph.structured_input_signature = (
+      func.structured_input_signature)
+  return rebuilt_func
+
+
+def _apply_inlining(func):
+  """Apply an inlining optimization to the function's graph definition."""
+  lower_control_flow = True
+  aggressive_inlining = False
+
+  graph_def = convert_to_constants._run_inline_graph_optimization(
+    func, lower_control_flow, aggressive_inlining)
+
+  return _construct_function_from_graph_def(func, graph_def)
+
+
 @tf_export("experimental.tensorrt.Converter", v1=[])
 class TrtGraphConverterV2(object):
   """An offline converter for TF-TRT transformation for TF 2.0 SavedModels.
@@ -1034,6 +1059,7 @@ class TrtGraphConverterV2(object):
                maximum_cached_engines=1,
                use_calibration=True,
                allow_build_at_runtime=True,
+               freeze=True,
                conversion_params=None):
     """Initialize the converter.
 
@@ -1073,6 +1099,7 @@ class TrtGraphConverterV2(object):
         runtime if no prebuilt TensorRT engine can be found that can handle the
         given inputs during runtime, then a new TensorRT engine is built at
         runtime if allow_build_at_runtime=True, and otherwise native TF is used.
+      freeze: whether to freeze or only inline the model before conversion.
       conversion_params: a TrtConversionParams instance (deprecated).
 
     Raises:
@@ -1098,6 +1125,7 @@ class TrtGraphConverterV2(object):
     self._input_saved_model_signature_key = (
         input_saved_model_signature_key or
         signature_constants.DEFAULT_SERVING_SIGNATURE_DEF_KEY)
+    self.freeze = freeze
 
     self._need_calibration = ((
         (conversion_params.precision_mode == TrtPrecisionMode.INT8) or
@@ -1160,19 +1188,6 @@ class TrtGraphConverterV2(object):
         if node.op == _TRT_ENGINE_OP_NAME:
           fn(node)
 
-  def _rebuild_func(self, func):
-    """Rebuild function from graph_def."""
-    rebuilt_func = wrap_function.function_from_graph_def(
-        self._converted_graph_def, [tensor.name for tensor in func.inputs],
-        [tensor.name for tensor in func.outputs])
-    rebuilt_func.graph.structured_outputs = nest.pack_sequence_as(
-        func.graph.structured_outputs, rebuilt_func.graph.structured_outputs)
-    # Copy structured input signature from original function (used during
-    # serialization)
-    rebuilt_func.graph.structured_input_signature = (
-        func.structured_input_signature)
-    return rebuilt_func
-
   # TODO(laigd): provide a utility function to optimize a ConcreteFunction and
   # use it here (b/124792963).
   def convert(self, calibration_input_fn=None):
@@ -1202,7 +1217,10 @@ class TrtGraphConverterV2(object):
     self._saved_model = load.load(self._input_saved_model_dir,
                                   self._input_saved_model_tags)
     func = self._saved_model.signatures[self._input_saved_model_signature_key]
-    frozen_func = convert_to_constants.convert_variables_to_constants_v2(func)
+    if self.freeze:
+      frozen_func = convert_to_constants.convert_variables_to_constants_v2(func)
+    else:
+      frozen_func = _apply_inlining(func)
     grappler_meta_graph_def = saver.export_meta_graph(
         graph_def=frozen_func.graph.as_graph_def(), graph=frozen_func.graph)
 
@@ -1215,27 +1233,8 @@ class TrtGraphConverterV2(object):
 
     # Run TRT optimizer in Grappler to convert the graph.
     self._converted_graph_def = self._run_conversion(grappler_meta_graph_def)
-    # If a function is converted, then the TF context contains the original
-    # function while the converted_graph_def contains the converted function.
-    # Remove the original function from the TF context in this case.
-    for f in self._converted_graph_def.library.function:
-      while context.context().has_function(f.signature.name):
-        logging.info("Removing original function %s from the context",
-                     f.signature.name)
-        context.context().remove_function(f.signature.name)
-    # This also adds the converted functions to the context.
-    self._converted_func = wrap_function.function_from_graph_def(
-        self._converted_graph_def,
-        [tensor.name for tensor in frozen_func.inputs],
-        [tensor.name for tensor in frozen_func.outputs])
-    # Reconstruct the output signatures using the ones from original model.
-    self._converted_func.graph.structured_outputs = nest.pack_sequence_as(
-        func.graph.structured_outputs,
-        self._converted_func.graph.structured_outputs)
-    # Copy structured input signature from original function (used during
-    # serialization)
-    self._converted_func.graph.structured_input_signature = (
-        func.structured_input_signature)
+    self._converted_func = _construct_function_from_graph_def(
+        frozen_func, self._converted_graph_def)
 
     if self._need_calibration:
       for inp in calibration_input_fn():
@@ -1254,7 +1253,8 @@ class TrtGraphConverterV2(object):
                               _save_calibration_table)
 
       # Rebuild the function since calibration has changed the graph.
-      self._converted_func = self._rebuild_func(self._converted_func)
+      self._converted_func = _construct_function_from_graph_def(
+          self._converted_func, self._converted_graph_def)
 
     self._converted = True
     return self._converted_func
@@ -1295,7 +1295,8 @@ class TrtGraphConverterV2(object):
       # Profile generation is enabled using the _profile_generation_mode
       # attribute of the TRTEngineOps. We need to rebuild the function to
       # change this attribute.
-      func = self._rebuild_func(self._converted_func)
+      func = _construct_function_from_graph_def(
+          self._converted_func, self._converted_graph_def)
     else:
       func = self._converted_func
 

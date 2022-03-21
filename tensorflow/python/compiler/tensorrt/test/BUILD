@@ -28,6 +28,9 @@ filegroup(
 filegroup(
     name = "trt_convert_test_data",
     srcs = [
+        "testdata/tf_variablev2_saved_model/saved_model.pb",
+        "testdata/tf_variablev2_saved_model/variables/variables.data-00000-of-00001",
+        "testdata/tf_variablev2_saved_model/variables/variables.index",
         "testdata/tftrt_2.0_saved_model/saved_model.pb",
         "testdata/tftrt_2.0_saved_model/variables/variables.data-00000-of-00002",
         "testdata/tftrt_2.0_saved_model/variables/variables.data-00001-of-00002",

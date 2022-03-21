@@ -308,5 +308,28 @@ class ControlDependencyTest(trt_test.TfTrtIntegrationTestBase):
         "output_0": {"incompatible2"},
     }
 
+
+# class VariableV2Test(trt_test.TfTrtIntegrationTestBase):
+#   # TODO: convert with freeze=False
+
+#   def GraphFn(self, inp):
+#     """Create a graph containing single segment."""
+#     n = inp
+#     v = constant_op.constant(1.0, name="v")  # TODO: VariableV2
+#     n = math_ops.add(n, v, name="add")
+#     n = math_ops.mul(n, n, name="mul")
+#     n = math_ops.add(n, n, name="add1")
+#     return array_ops.squeeze(n, name="output_0")
+
+#   def GetParams(self):
+#     shapes = [[2, 32, 32, 3]]
+#     return self.BuildParams(self.GraphFn, dtypes.float32, input_shapes=shapes,
+#                             output_shapes=shapes)
+
+#   def ExpectedEnginesToBuild(self, run_params):
+#     """Return the expected engines to build."""
+#     return {"TRTEngineOp_0": ["v", "add", "add1", "mul"]}
+
+
 if __name__ == "__main__":
   test.main()
