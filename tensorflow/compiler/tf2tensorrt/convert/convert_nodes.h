@@ -213,6 +213,12 @@ class TrtNodeValidator {
                                const std::vector<TRT_TensorOrWeights>& inputs,
                                TRT_TensorOrWeights* output);
 
+  // Convert a VariableV2 node to a TRT_TensorOrWeights.
+  Status ConvertVariableToWeights(
+      const NodeDef& const_node_def,
+      const std::vector<TRT_TensorOrWeights>& inputs,
+      TRT_TensorOrWeights* output);
+
   // Convert the output tensor at 'output_port' of 'node_def' to a
   // TRT_TensorOrWeights which will be later used as an input to other nodes and
   // passed to ValidateNode() below.

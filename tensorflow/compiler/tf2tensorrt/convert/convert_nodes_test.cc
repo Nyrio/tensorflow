@@ -2095,8 +2095,9 @@ void CopyTensorElements(const Tensor& tensor, protobuf::RepeatedField<T>* out) {
 }
 
 template <DataType dtype, typename CType>
-void TestConvertVariableV2(VariableOpConverterTest* test) {
+void TestConvertVariableV2(OpConverterTest* test) {
   struct TestParam {
+    // TODO: more params
     string container;
     string shared_name;
     std::vector<int> dims;
@@ -2122,11 +2123,69 @@ void TestConvertVariableV2(VariableOpConverterTest* test) {
             .Attr("shared_name", p.shared_name)
             .Finalize(&node_def));
 
-    OpKernel* kernel;
-    OpKernelContext* context;
-    test->CreateContext(node_def, &kernel, &context);
+    // TODO: take some of this code out of the loop?
 
-    test->Reset(TrtPrecisionMode::FP32, TrtTestMode::kDynamicShape);
+    std::unique_ptr<Device> device(DeviceFactory::NewDevice(
+        "GPU", {}, "/job:a/replica:0/task:0"));
+    Device* device_ptr = device.get();
+
+    std::unique_ptr<DeviceMgr> device_mgr =
+        absl::make_unique<StaticDeviceMgr>(std::move(device));
+
+    std::unique_ptr<Allocator> managed_allocator =
+        absl::make_unique<GpuManagedAllocator>();
+    Allocator* allocator = managed_allocator.get();
+    std::unique_ptr<ScopedStepContainer> step_container =
+        absl::make_unique<ScopedStepContainer>(0, [](const string&) {});
+    checkpoint::TensorSliceReaderCacheWrapper slice_reader_cache_wrapper;
+    gtl::InlinedVector<TensorValue, 4> inputs;
+
+    std::unique_ptr<FunctionLibraryDefinition> flib_def =
+        absl::make_unique<FunctionLibraryDefinition>(OpRegistry::Global(),
+                                                     FunctionDefLibrary{});
+
+    std::unique_ptr<thread::ThreadPool> thread_pool =
+        absl::make_unique<thread::ThreadPool>(Env::Default(), "default",
+                                              /*num_threads=*/1);
+    std::unique_ptr<ProcessFunctionLibraryRuntime> pflr =
+        absl::make_unique<ProcessFunctionLibraryRuntime>(
+            device_mgr.get(), Env::Default(), /*config=*/nullptr,
+            TF_GRAPH_DEF_VERSION, flib_def.get(), OptimizerOptions(),
+            thread_pool.get());
+
+    FunctionLibraryRuntime* flib = pflr->GetFLR(device_ptr->name());
+    ResourceMgr* resource_mgr = device_ptr->resource_manager();
+
+    std::shared_ptr<const NodeProperties> props;
+    TF_CHECK_OK(NodeProperties::CreateFromNodeDef(
+        node_def, OpRegistry::Global(), &props));
+
+    OpKernel* kernel = nullptr;
+    TF_CHECK_OK(CreateOpKernel(DEVICE_GPU, device_ptr, allocator, flib,
+                               resource_mgr, props,
+                               TF_GRAPH_DEF_VERSION, &kernel));
+    std::unique_ptr<OpKernel> op_kernel = std::unique_ptr<OpKernel>(kernel);
+
+    auto* dev_info = device_ptr->tensorflow_gpu_device_info();
+    CHECK(dev_info);
+    DeviceContext* device_context = dev_info->default_context;
+
+    // Note: this setup is not exhaustive.
+    OpKernelContext::Params params;
+    params.device = device_ptr;
+    params.op_kernel = op_kernel.get();
+    params.resource_manager = resource_mgr;
+    params.frame_iter = FrameAndIter(0, 0);
+    params.inputs = &inputs;
+    params.step_container = step_container.get();
+    params.function_library = flib;
+    params.slice_reader_cache = &slice_reader_cache_wrapper;
+    params.op_device_context = device_context;
+
+    std::unique_ptr<OpKernelContext> context(new OpKernelContext(&params));
+
+    test->Reset(TrtPrecisionMode::FP32, TrtTestMode::kDynamicShape,
+                context.get());
 
     // Set the value of the variable according to p.dims.
     int var_size = std::accumulate(p.dims.begin(), p.dims.end(), 1,
@@ -2134,6 +2193,7 @@ void TestConvertVariableV2(VariableOpConverterTest* test) {
     std::vector<CType> expected_value;
     expected_value.reserve(var_size);
     for (int i = 0; i < var_size; i++) {
+      // Set expected_value[i] = (cast)i.
       expected_value.push_back((CType)i);
     }
 
@@ -2141,11 +2201,11 @@ void TestConvertVariableV2(VariableOpConverterTest* test) {
     // rather than creating the resource directly in the manager, because:
     // 1) LegacyVar defined in `variable_ops.cc` is not accessible.
     // 2) Tensor::set_shape is private, VariableOp is a friend class.
-    kernel->Compute(context);
+    kernel->Compute(context.get());
     Tensor* tensor_ptr = context->mutable_output(0);
     CHECK(tensor_ptr);
     // We allocate the tensor in the temporary memory. Note that creating a
-    // tensor in this scope and sharing the underlying storage by copy would
+    // tensor in this scooe and sharing the underlying storage by copy would
     // lead to double destruction.
     AllocatorAttributes attr;
     attr.set_gpu_compatible(true);
@@ -2164,12 +2224,13 @@ void TestConvertVariableV2(VariableOpConverterTest* test) {
     TF_EXPECT_OK(test->GetTensorOrWeights("my_var", &output));
     EXPECT_THAT(output.weights(),
                 ShapedWeightsHasDimsAndValues<CType>(p.dims, expected_value));
+    LOG(WARNING) << "end iter";
   }
+  LOG(WARNING) << "end test";
 }
 
-TEST_F(VariableOpConverterTest, ConvertVariableV2) {
+TEST_F(OpConverterTest, ConvertVariableV2) {
   TestConvertVariableV2<DT_FLOAT, float>(this);
-  TestConvertVariableV2<DT_HALF, Eigen::half>(this);
 }
 
 template <DataType dtype, typename InputCType, typename OutputCType>

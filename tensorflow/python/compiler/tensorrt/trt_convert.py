@@ -1066,6 +1066,7 @@ class TrtGraphConverterV2(object):
                maximum_cached_engines=1,
                use_calibration=True,
                allow_build_at_runtime=True,
+               freeze=True,
                conversion_params=None):
     """Initialize the converter.
 
@@ -1105,6 +1106,7 @@ class TrtGraphConverterV2(object):
         runtime if no prebuilt TensorRT engine can be found that can handle the
         given inputs during runtime, then a new TensorRT engine is built at
         runtime if allow_build_at_runtime=True, and otherwise native TF is used.
+      freeze: whether to freeze or only inline the model before conversion.
       conversion_params: a TrtConversionParams instance (deprecated).
 
     Raises:
@@ -1239,16 +1241,8 @@ class TrtGraphConverterV2(object):
 
     # Run TRT optimizer in Grappler to convert the graph.
     self._converted_graph_def = self._run_conversion(grappler_meta_graph_def)
-    # If a function is converted, then the TF context contains the original
-    # function while the converted_graph_def contains the converted function.
-    # Remove the original function from the TF context in this case.
-    for f in self._converted_graph_def.library.function:
-      while context.context().has_function(f.signature.name):
-        logging.info("Removing original function %s from the context",
-                     f.signature.name)
-        context.context().remove_function(f.signature.name)
     self._converted_func = _construct_function_from_graph_def(
-        func, self._converted_graph_def, frozen_func)
+        frozen_func, self._converted_graph_def)
 
     if self._need_calibration:
       for inp in calibration_input_fn():
