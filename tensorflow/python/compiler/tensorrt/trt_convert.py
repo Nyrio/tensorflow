@@ -906,11 +906,13 @@ def _get_engine_dtypes_from_node(node, key):
   return [dtypes._TYPE_TO_STRING[dtype] for dtype in node.attr[key].list.type]
 
 
-def _construct_function_from_graph_def(func, graph_def):
+def _construct_function_from_graph_def(func, graph_def, frozen_func=None):
   """Rebuild function from graph_def."""
+  if frozen_func is None:
+    frozen_func = func
   rebuilt_func = wrap_function.function_from_graph_def(
-      graph_def, [tensor.name for tensor in func.inputs],
-      [tensor.name for tensor in func.outputs])
+      graph_def, [tensor.name for tensor in frozen_func.inputs],
+      [tensor.name for tensor in frozen_func.outputs])
   rebuilt_func.graph.structured_outputs = nest.pack_sequence_as(
       func.graph.structured_outputs, rebuilt_func.graph.structured_outputs)
   # Copy structured input signature from original function (used during
@@ -1233,8 +1235,16 @@ class TrtGraphConverterV2(object):
 
     # Run TRT optimizer in Grappler to convert the graph.
     self._converted_graph_def = self._run_conversion(grappler_meta_graph_def)
+    # If a function is converted, then the TF context contains the original
+    # function while the converted_graph_def contains the converted function.
+    # Remove the original function from the TF context in this case.
+    for f in self._converted_graph_def.library.function:
+      while context.context().has_function(f.signature.name):
+        logging.info("Removing original function %s from the context",
+                     f.signature.name)
+        context.context().remove_function(f.signature.name)
     self._converted_func = _construct_function_from_graph_def(
-        frozen_func, self._converted_graph_def)
+        func, self._converted_graph_def, frozen_func)
 
     if self._need_calibration:
       for inp in calibration_input_fn():
