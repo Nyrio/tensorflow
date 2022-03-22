@@ -17,7 +17,6 @@
 import os
 
 from distutils import version
-from contextlib import contextmanager
 
 from tensorflow.compiler.tf2tensorrt import _pywrap_py_utils
 from tensorflow.core.protobuf import rewriter_config_pb2
