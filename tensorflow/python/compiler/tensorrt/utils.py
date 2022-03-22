@@ -14,7 +14,11 @@
 # =============================================================================
 """Exposes the Python wrapper conversion to trt_graph."""
 
+import copy
+import os
+
 from distutils import version
+from contextlib import contextmanager
 
 from tensorflow.compiler.tf2tensorrt import _pywrap_py_utils
 from tensorflow.core.protobuf import rewriter_config_pb2
@@ -69,3 +73,23 @@ def is_linked_tensorrt_version_greater_equal(major, minor=0, patch=0):
 def is_loaded_tensorrt_version_greater_equal(major, minor=0, patch=0):
   ver = _pywrap_py_utils.get_loaded_tensorrt_version()
   return _is_tensorrt_version_greater_equal(ver, (major, minor, patch))
+
+
+def is_experimental_feature_activated(feature_name):
+  return (
+    feature_name in 
+    os.environ.get("TF_TRT_EXPERIMENTAL_FEATURES", default="")
+  )
+
+@contextmanager
+def tf_trt_experimental_scope(feature_name):
+    os_env = copy.deepcopy(os.environ)
+    os.environ["TF_TRT_EXPERIMENTAL_FEATURES"] = ",".join(
+      os.environ.get("TF_TRT_EXPERIMENTAL_FEATURES", default="").split(",") + 
+      [feature_name]
+    )
+    
+    try:
+        yield
+    finally:
+        os.environ = os_env
