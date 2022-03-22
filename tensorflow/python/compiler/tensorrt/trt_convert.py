@@ -1241,8 +1241,16 @@ class TrtGraphConverterV2(object):
 
     # Run TRT optimizer in Grappler to convert the graph.
     self._converted_graph_def = self._run_conversion(grappler_meta_graph_def)
+    # If a function is converted, then the TF context contains the original
+    # function while the converted_graph_def contains the converted function.
+    # Remove the original function from the TF context in this case.
+    for f in self._converted_graph_def.library.function:
+      while context.context().has_function(f.signature.name):
+        logging.info("Removing original function %s from the context",
+                     f.signature.name)
+        context.context().remove_function(f.signature.name)
     self._converted_func = _construct_function_from_graph_def(
-        frozen_func, self._converted_graph_def)
+        func, self._converted_graph_def, frozen_func)
 
     if self._need_calibration:
       for inp in calibration_input_fn():
