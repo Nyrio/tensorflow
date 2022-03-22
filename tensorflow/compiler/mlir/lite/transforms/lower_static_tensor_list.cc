@@ -37,7 +37,7 @@ limitations under the License.
 #include "llvm/Support/Debug.h"
 #include "mlir/Dialect/Affine/Analysis/LoopAnalysis.h"  // from @llvm-project
 #include "mlir/Dialect/Arithmetic/IR/Arithmetic.h"  // from @llvm-project
-#include "mlir/Dialect/StandardOps/IR/Ops.h"  // from @llvm-project
+#include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
 #include "mlir/IR/Attributes.h"  // from @llvm-project
 #include "mlir/IR/Block.h"  // from @llvm-project
 #include "mlir/IR/BuiltinAttributes.h"  // from @llvm-project
@@ -829,7 +829,7 @@ struct ConvertTensorListResize
                             Type result_type, FuncOp branch_func,
                             ConversionPatternRewriter *rewriter) const {
     auto guard = OpBuilder::InsertionGuard(*rewriter);
-    auto inputs = branch_func.getType().getInputs();
+    auto inputs = branch_func.getFunctionType().getInputs();
     Block *block = rewriter->createBlock(
         &branch_func.getBody(), branch_func.begin(), inputs,
         SmallVector<Location>(inputs.size(), branch_func.getLoc()));
@@ -860,7 +860,7 @@ struct ConvertTensorListResize
     auto concat_op = rewriter->create<TF::ConcatOp>(
         loc, result_type, scalar_zero,
         ArrayRef<Value>({input, stacked_extended_part}));
-    rewriter->create<ReturnOp>(loc, ArrayRef<Value>({concat_op}));
+    rewriter->create<func::ReturnOp>(loc, ArrayRef<Value>({concat_op}));
   }
 
   void CreateCondFalseBranch(Location loc, Type shape_dtype, Type result_type,
@@ -870,7 +870,7 @@ struct ConvertTensorListResize
     // size, the else branch is executed.
     // Slice the first 'size' rows from the input tensorlist.
     auto guard = OpBuilder::InsertionGuard(*rewriter);
-    auto inputs = branch_func.getType().getInputs();
+    auto inputs = branch_func.getFunctionType().getInputs();
     Block *block = rewriter->createBlock(
         &branch_func.getBody(), branch_func.begin(), inputs,
         SmallVector<Location>(inputs.size(), branch_func.getLoc()));
@@ -891,7 +891,7 @@ struct ConvertTensorListResize
                                    /*start_index=*/scalar_zero, /*size=*/size,
                                    /*item_rank=*/partial_position_shape,
                                    /*result_type=*/result_type, rewriter);
-    rewriter->create<ReturnOp>(loc, ArrayRef<Value>({slice_op}));
+    rewriter->create<func::ReturnOp>(loc, ArrayRef<Value>({slice_op}));
   }
 };
 
@@ -1053,11 +1053,11 @@ struct ConvertIdentity : public OpConversionPattern<TF::IdentityOp> {
   }
 };
 
-struct ConvertReturn : public OpConversionPattern<ReturnOp> {
+struct ConvertReturn : public OpConversionPattern<func::ReturnOp> {
   using OpConversionPattern::OpConversionPattern;
 
   LogicalResult matchAndRewrite(
-      ReturnOp op, OpAdaptor adaptor,
+      func::ReturnOp op, OpAdaptor adaptor,
       ConversionPatternRewriter &rewriter) const override {
     rewriter.updateRootInPlace(op,
                                [&] { op->setOperands(adaptor.getOperands()); });
@@ -1152,7 +1152,7 @@ llvm::SmallSet<int, 4> GetTensorListResultsIndex(FuncOp func) {
   llvm::SmallSet<int, 4> set;
 
   for (const auto &result_and_idx :
-       llvm::enumerate(func.getType().getResults())) {
+       llvm::enumerate(func.getFunctionType().getResults())) {
     if (IsTensorListType(result_and_idx.value(), llvm::None)) {
       set.insert(result_and_idx.index());
     }
@@ -1239,7 +1239,7 @@ LogicalResult UpdateFunctionTypesForWhileOp(
     ++func_index;
     if (!func) continue;
 
-    FunctionType func_type = func.getType();
+    FunctionType func_type = func.getFunctionType();
     int num_inputs = func_type.getNumInputs();
     int num_results = func_type.getNumResults();
 
@@ -1283,7 +1283,7 @@ LogicalResult UpdateFunctionTypesForIfOp(
   for (FuncOp func : {op.else_function(), op.then_function()}) {
     if (!func) continue;
 
-    FunctionType func_type = func.getType();
+    FunctionType func_type = func.getFunctionType();
     int num_inputs = func_type.getNumInputs();
 
     // Update the argument types of the function. If it's a tensorlist and
@@ -1531,7 +1531,7 @@ void LowerStaticTensorListPass::runOnOperation() {
   // TODO(hinsu): Use TFLite constant op for constants.
   target.addLegalOp<arith::ConstantOp>();
   target.addLegalOp<FuncOp>();
-  target.addDynamicallyLegalOp<ReturnOp>(is_legal);
+  target.addDynamicallyLegalOp<func::ReturnOp>(is_legal);
   target.addDynamicallyLegalOp<TF::YieldOp>(is_legal);
   target.addLegalOp<TFL::CustomOp>();
   // Register fused LSTM/RNN ops as legal.

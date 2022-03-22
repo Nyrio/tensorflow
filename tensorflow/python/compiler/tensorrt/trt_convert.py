@@ -20,6 +20,7 @@ import os
 import platform
 import tempfile
 
+import numpy as np
 import six as _six
 
 from tensorflow.core.protobuf import config_pb2
@@ -933,6 +934,10 @@ def _apply_inlining(func):
   return _construct_function_from_graph_def(func, graph_def)
 
 
+def _get_engines_io_nodes_count(node, key):
+  return len(node.attr[key].list.type)
+
+
 @tf_export("experimental.tensorrt.Converter", v1=[])
 class TrtGraphConverterV2(object):
   """An offline converter for TF-TRT transformation for TF 2.0 SavedModels.
@@ -1454,13 +1459,23 @@ class TrtGraphConverterV2(object):
     # positions are percentage of `line_length`. positions[i]+1 is the starting
     # position for (i+1)th field. We also make sure that the last char printed
     # for each field is a space.
-    positions = [.22, .30, .45, .60, .8, 1.]
-    positions = [int(line_length * p) for p in positions]
-
-    headers = [
-        "TRTEngineOP Name", "# Nodes", "Input DType", "Output Dtype",
-        "Input Shape", "Output Shape"
+    columns = [
+        # (column name, column size in % of line)
+        ("TRTEngineOP Name", .20),  # 20%
+        ("Device", .09),  # 29%
+        ("# Nodes", .05),  # 34%
+        ("# Inputs", .09),  # 43%
+        ("# Outputs", .09),  # 52%
+        ("Input DTypes", .12),  # 64%
+        ("Output Dtypes", .12),  # 76%
+        ("Input Shapes", .12),  # 88%
+        ("Output Shapes", .12)  # 100%
     ]
+
+    positions = [int(line_length * p) for _, p in columns]
+    positions = np.cumsum(positions).tolist()
+    headers = [h for h, _ in columns]
+
     _print_row(headers, positions, print_fn=print_fn)
     print_fn("=" * line_length)
 
@@ -1470,34 +1485,42 @@ class TrtGraphConverterV2(object):
 
     graphdef = self._converted_func.graph.as_graph_def(add_shapes=True)
 
+    trtengineops_dict = dict()
     for node in graphdef.node:
       if node.op != "TRTEngineOp":
         n_ops_not_converted += 1
         continue
       else:
+        trtengineops_dict[node.name] = node
         n_engines += 1
 
-        in_shapes = _extract_shapes_from_node(node, "input_shapes")
-        out_shapes = _extract_shapes_from_node(node, "_output_shapes")
-        in_dtypes = _get_engine_dtypes_from_node(node, "InT")
-        out_dtypes = _get_engine_dtypes_from_node(node, "OutT")
-        node_count, converted_ops_dict = _get_nodes_in_engine(
-            graphdef, node.name)
+    for name, node in sorted(trtengineops_dict.items()):
+      node_device = node.device.split("/")[-1]
+      in_shapes = _extract_shapes_from_node(node, "input_shapes")
+      out_shapes = _extract_shapes_from_node(node, "_output_shapes")
+      in_dtypes = _get_engine_dtypes_from_node(node, "InT")
+      out_dtypes = _get_engine_dtypes_from_node(node, "OutT")
+      in_nodes_count = _get_engines_io_nodes_count(node, "InT")
+      out_nodes_count = _get_engines_io_nodes_count(node, "OutT")
+      node_count, converted_ops_dict = _get_nodes_in_engine(graphdef, name)
 
-        n_ops_converted += node_count
+      n_ops_converted += node_count
 
-        if n_engines != 1:
-          print_fn(f"\n{'-'*40}\n")
+      if n_engines != 1:
+        print_fn(f"\n{'-'*40}\n")
 
-        _print_row([
-            node.name, node_count, in_dtypes, out_dtypes, in_shapes, out_shapes
-        ],
-                   positions,
-                   print_fn=print_fn)
-        if detailed:
-          print_fn()
-          for key, value in sorted(dict(converted_ops_dict).items()):
-            print_fn(f"\t- {key}: {value}x")
+      _print_row(
+          fields=[
+              name, node_device, node_count, in_nodes_count, out_nodes_count,
+              in_dtypes, out_dtypes, in_shapes, out_shapes
+          ],
+          positions=positions,
+          print_fn=print_fn)
+
+      if detailed:
+        print_fn()
+        for key, value in sorted(dict(converted_ops_dict).items()):
+          print_fn(f"\t- {key}: {value}x")
 
     print_fn(f"\n{'='*line_length}")
     print_fn(f"[*] Total number of TensorRT engines: {n_engines}")

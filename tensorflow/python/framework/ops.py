@@ -27,6 +27,7 @@ import six
 from six.moves import map  # pylint: disable=redefined-builtin
 
 from tensorflow.core.framework import attr_value_pb2
+from tensorflow.core.framework import full_type_pb2
 from tensorflow.core.framework import function_pb2
 from tensorflow.core.framework import graph_pb2
 from tensorflow.core.framework import node_def_pb2
@@ -2693,6 +2694,24 @@ class Operation(object):
       # Convert to ValueError for backwards compatibility.
       raise ValueError(e.message)
 
+  def experimental_set_type(self, type_proto):
+    """Sets the corresponding node's `experimental_type` field.
+
+    See the description of `NodeDef.experimental_type` for more info.
+
+    Args:
+      type_proto: A FullTypeDef proto message. The root type_if of this object
+        must be `TFT_PRODUCT`, even for ops which only have a singlre return
+        value.
+    """
+    if (type_proto.type_id
+        not in (full_type_pb2.TFT_UNSET, full_type_pb2.TFT_PRODUCT)):
+      raise ValueError("error setting the type of ", self.name,
+                       ": expected TFT_UNSET or TFT_PRODUCT, got ",
+                       type_proto.type_id)
+    pywrap_tf_session.SetFullType(
+        self._graph._c_graph, self._c_op, type_proto.SerializeToString())  # pylint:disable=protected-access
+
   def run(self, feed_dict=None, session=None):
     """Runs this operation in a `Session`.
 
@@ -3594,10 +3613,12 @@ class Graph(object):
 
     # Add function to graph
     # pylint: disable=protected-access
-    gradient = (
-        function._grad_func._c_func.func if function._grad_func else None)
-    pywrap_tf_session.TF_GraphCopyFunction(self._c_graph, function._c_func.func,
-                                           gradient)
+    with function._c_func.get() as func:
+      if function._grad_func:
+        with function._grad_func._c_func.get() as gradient:
+          pywrap_tf_session.TF_GraphCopyFunction(self._c_graph, func, gradient)
+      else:
+        pywrap_tf_session.TF_GraphCopyFunction(self._c_graph, func, None)
     # pylint: enable=protected-access
 
     self._functions[compat.as_str(name)] = function

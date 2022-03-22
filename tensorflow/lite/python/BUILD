@@ -192,6 +192,7 @@ py_library(
         "//tensorflow/lite/experimental/microfrontend:audio_microfrontend_py",
         "//tensorflow/lite/python/metrics",
         "//tensorflow/lite/python/optimize:calibrator",
+        "//tensorflow/lite/tools:flatbuffer_utils",
         "//tensorflow/lite/tools/optimize/debugging/python:debugger",
         "//tensorflow/python/client:session",
         "//tensorflow/python/eager:context",
@@ -247,6 +248,7 @@ py_test(
     shard_count = 18,
     srcs_version = "PY3",
     tags = [
+        "no_oss",  # TODO(b/226181706): Remove after fixing the test
         "no_windows",
     ],
     deps = [
@@ -305,6 +307,7 @@ py_library(
         ":schema_util",
         "//tensorflow/lite/python:tflite_keras_util",
         "//tensorflow/lite/toco:toco_flags_proto_py",
+        "//tensorflow/lite/tools:flatbuffer_utils",
         "//tensorflow/python:convert_to_constants",
         "//tensorflow/python:dtypes",
         "//tensorflow/python:error_interpolation",
