@@ -76,20 +76,39 @@ def is_loaded_tensorrt_version_greater_equal(major, minor=0, patch=0):
 
 
 def is_experimental_feature_activated(feature_name):
+  """This helper function checks if an experimental feature was enabled using
+  the environment variable `TF_TRT_EXPERIMENTAL_FEATURES=feature_1,feature_2`.
+
+  Args:
+    feature_name: Name of the feature being tested for activation.
+  """
   return (
-    feature_name in 
+    feature_name in
     os.environ.get("TF_TRT_EXPERIMENTAL_FEATURES", default="")
   )
 
 @contextmanager
 def tf_trt_experimental_scope(feature_name):
-    os_env = copy.deepcopy(os.environ)
-    os.environ["TF_TRT_EXPERIMENTAL_FEATURES"] = ",".join(
-      os.environ.get("TF_TRT_EXPERIMENTAL_FEATURES", default="").split(",") + 
+  """This helper function creates a contextmanager setting up an experimental
+  feature temporarily. We expect this helper function to be mainly used by
+  unittests.
+
+  Example:
+  ```
+  with tf_trt_experimental_scope("feature_1"):
+    do_smthg()
+  ```
+
+  Args:
+    feature_name: Name of the feature being tested for activation.
+  """
+  env_bckp = copy.deepcopy(os.environ)
+  os.environ["TF_TRT_EXPERIMENTAL_FEATURES"] = ",".join(
+      os.environ.get("TF_TRT_EXPERIMENTAL_FEATURES", default="").split(",") +
       [feature_name]
-    )
-    
-    try:
-        yield
-    finally:
-        os.environ = os_env
+  )
+
+  try:
+    yield
+  finally:
+    os.environ = env_bckp
