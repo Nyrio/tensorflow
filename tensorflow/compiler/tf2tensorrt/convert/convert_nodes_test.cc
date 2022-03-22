@@ -1137,8 +1137,7 @@ class OpConverterTest : public ::testing::Test {
   }
 
   void Reset(TrtPrecisionMode precision_mode_to_test = TrtPrecisionMode::FP32,
-             TrtTestMode trt_mode = TrtTestMode::kImplicitBatch,
-             OpKernelContext* ctx = nullptr) {
+             TrtTestMode trt_mode = TrtTestMode::kImplicitBatch) {
     // Destroy existing TRT objects in a proper order.
     converter_.reset(nullptr);
     engine_.reset(nullptr);
@@ -1151,11 +1150,71 @@ class OpConverterTest : public ::testing::Test {
                                         TrtTestMode::kImplicitBatch,
                                     /*engine_name=*/"",
                                     /*use_explicit_precision=*/false,
-                                    ctx)
+                                    context_.get())
                       .ValueOrDie());
 
     // Reset other related artifacts.
     scope_ = Scope::NewRootScope();
+  }
+
+  void CreateContext(const NodeDef& node_def, OpKernel** kernel,
+                     OpKernelContext** context) {
+    std::unique_ptr<Device> device_(
+        DeviceFactory::NewDevice("GPU", {}, "/job:a/replica:0/task:0"));
+    Device* device_ptr = device_.get();
+
+    device_mgr_ = absl::make_unique<StaticDeviceMgr>(std::move(device_));
+
+    managed_allocator_ = absl::make_unique<GpuManagedAllocator>();
+    Allocator* allocator = managed_allocator_.get();
+    step_container_ =
+        absl::make_unique<ScopedStepContainer>(0, [](const string&) {});
+    slice_reader_cache_wrapper_ =
+        absl::make_unique<checkpoint::TensorSliceReaderCacheWrapper>();
+
+    flib_def_ = absl::make_unique<FunctionLibraryDefinition>(
+        OpRegistry::Global(), FunctionDefLibrary{});
+
+    thread_pool_ =
+        absl::make_unique<thread::ThreadPool>(Env::Default(), "default",
+                                              /*num_threads=*/1);
+    pflr_ = absl::make_unique<ProcessFunctionLibraryRuntime>(
+        device_mgr_.get(), Env::Default(), /*config=*/nullptr,
+        TF_GRAPH_DEF_VERSION, flib_def_.get(), OptimizerOptions(),
+        thread_pool_.get());
+
+    FunctionLibraryRuntime* flib = pflr_->GetFLR(device_ptr->name());
+    ResourceMgr* resource_mgr = device_ptr->resource_manager();
+
+    TF_CHECK_OK(NodeProperties::CreateFromNodeDef(
+        node_def, OpRegistry::Global(), &props_));
+
+    OpKernel* kernel_ptr = nullptr;
+    TF_CHECK_OK(CreateOpKernel(DEVICE_GPU, device_ptr, allocator, flib,
+                               resource_mgr, props_, TF_GRAPH_DEF_VERSION,
+                               &kernel_ptr));
+    op_kernel_ = std::unique_ptr<OpKernel>(kernel_ptr);
+
+    auto* dev_info = device_ptr->tensorflow_gpu_device_info();
+    CHECK(dev_info);
+    DeviceContext* device_context = dev_info->default_context;
+
+    // Note: this setup is not exhaustive.
+    params_.device = device_ptr;
+    params_.op_kernel = op_kernel_.get();
+    params_.resource_manager = resource_mgr;
+    params_.frame_iter = FrameAndIter(0, 0);
+    params_.inputs = &inputs_;
+    params_.step_container = step_container_.get();
+    params_.function_library = flib;
+    params_.slice_reader_cache = slice_reader_cache_wrapper_.get();
+    params_.op_device_context = device_context;
+
+    context_ = absl::make_unique<OpKernelContext>(&params_);
+
+    // Outputs.
+    *kernel = op_kernel_.get();
+    *context = context_.get();
   }
 
   // Constructs a flat tensor with 'vals' in Unified Memory.
@@ -1519,6 +1578,20 @@ class OpConverterTest : public ::testing::Test {
   // field list.
   Scope scope_;
   std::unordered_map<string, Output> node_inputs_;
+  // The following pointers manage the kernel context.
+  std::unique_ptr<DeviceMgr> device_mgr_;
+  std::unique_ptr<Allocator> managed_allocator_;
+  std::unique_ptr<ScopedStepContainer> step_container_;
+  std::unique_ptr<checkpoint::TensorSliceReaderCacheWrapper>
+      slice_reader_cache_wrapper_;
+  std::unique_ptr<FunctionLibraryDefinition> flib_def_;
+  std::unique_ptr<thread::ThreadPool> thread_pool_;
+  std::unique_ptr<ProcessFunctionLibraryRuntime> pflr_;
+  OpKernelContext::Params params_;
+  std::unique_ptr<OpKernel> op_kernel_;
+  std::unique_ptr<OpKernelContext> context_;
+  std::shared_ptr<const NodeProperties> props_;
+  gtl::InlinedVector<TensorValue, 4> inputs_;
 };
 
 // General test parameters to be used with ops that take a single input tensor.
@@ -1857,69 +1930,11 @@ void TestConvertVariableV2(OpConverterTest* test) {
             .Attr("shared_name", p.shared_name)
             .Finalize(&node_def));
 
-    // TODO: take some of this code out of the loop?
+    OpKernel* kernel;
+    OpKernelContext* context;
+    test->CreateContext(node_def, &kernel, &context);
 
-    std::unique_ptr<Device> device(DeviceFactory::NewDevice(
-        "GPU", {}, "/job:a/replica:0/task:0"));
-    Device* device_ptr = device.get();
-
-    std::unique_ptr<DeviceMgr> device_mgr =
-        absl::make_unique<StaticDeviceMgr>(std::move(device));
-
-    std::unique_ptr<Allocator> managed_allocator =
-        absl::make_unique<GpuManagedAllocator>();
-    Allocator* allocator = managed_allocator.get();
-    std::unique_ptr<ScopedStepContainer> step_container =
-        absl::make_unique<ScopedStepContainer>(0, [](const string&) {});
-    checkpoint::TensorSliceReaderCacheWrapper slice_reader_cache_wrapper;
-    gtl::InlinedVector<TensorValue, 4> inputs;
-
-    std::unique_ptr<FunctionLibraryDefinition> flib_def =
-        absl::make_unique<FunctionLibraryDefinition>(OpRegistry::Global(),
-                                                     FunctionDefLibrary{});
-
-    std::unique_ptr<thread::ThreadPool> thread_pool =
-        absl::make_unique<thread::ThreadPool>(Env::Default(), "default",
-                                              /*num_threads=*/1);
-    std::unique_ptr<ProcessFunctionLibraryRuntime> pflr =
-        absl::make_unique<ProcessFunctionLibraryRuntime>(
-            device_mgr.get(), Env::Default(), /*config=*/nullptr,
-            TF_GRAPH_DEF_VERSION, flib_def.get(), OptimizerOptions(),
-            thread_pool.get());
-
-    FunctionLibraryRuntime* flib = pflr->GetFLR(device_ptr->name());
-    ResourceMgr* resource_mgr = device_ptr->resource_manager();
-
-    std::shared_ptr<const NodeProperties> props;
-    TF_CHECK_OK(NodeProperties::CreateFromNodeDef(
-        node_def, OpRegistry::Global(), &props));
-
-    OpKernel* kernel = nullptr;
-    TF_CHECK_OK(CreateOpKernel(DEVICE_GPU, device_ptr, allocator, flib,
-                               resource_mgr, props,
-                               TF_GRAPH_DEF_VERSION, &kernel));
-    std::unique_ptr<OpKernel> op_kernel = std::unique_ptr<OpKernel>(kernel);
-
-    auto* dev_info = device_ptr->tensorflow_gpu_device_info();
-    CHECK(dev_info);
-    DeviceContext* device_context = dev_info->default_context;
-
-    // Note: this setup is not exhaustive.
-    OpKernelContext::Params params;
-    params.device = device_ptr;
-    params.op_kernel = op_kernel.get();
-    params.resource_manager = resource_mgr;
-    params.frame_iter = FrameAndIter(0, 0);
-    params.inputs = &inputs;
-    params.step_container = step_container.get();
-    params.function_library = flib;
-    params.slice_reader_cache = &slice_reader_cache_wrapper;
-    params.op_device_context = device_context;
-
-    std::unique_ptr<OpKernelContext> context(new OpKernelContext(&params));
-
-    test->Reset(TrtPrecisionMode::FP32, TrtTestMode::kDynamicShape,
-                context.get());
+    test->Reset(TrtPrecisionMode::FP32, TrtTestMode::kDynamicShape);
 
     // Set the value of the variable according to p.dims.
     int var_size = std::accumulate(p.dims.begin(), p.dims.end(), 1,
@@ -1935,7 +1950,7 @@ void TestConvertVariableV2(OpConverterTest* test) {
     // rather than creating the resource directly in the manager, because:
     // 1) LegacyVar defined in `variable_ops.cc` is not accessible.
     // 2) Tensor::set_shape is private, VariableOp is a friend class.
-    kernel->Compute(context.get());
+    kernel->Compute(context);
     Tensor* tensor_ptr = context->mutable_output(0);
     CHECK(tensor_ptr);
     // We allocate the tensor in the temporary memory. Note that creating a
@@ -1954,14 +1969,11 @@ void TestConvertVariableV2(OpConverterTest* test) {
     CHECK(ret == 0);
 
     test->RunValidationAndConversion(node_def);
-    LOG(WARNING) << "after return";
     TRT_TensorOrWeights output;
     TF_EXPECT_OK(test->GetTensorOrWeights("my_var", &output));
     EXPECT_THAT(output.weights(),
                 ShapedWeightsHasDimsAndValues<CType>(p.dims, expected_value));
-    LOG(WARNING) << "end iter";
   }
-  LOG(WARNING) << "end test";
 }
 
 TEST_F(OpConverterTest, ConvertVariableV2) {
