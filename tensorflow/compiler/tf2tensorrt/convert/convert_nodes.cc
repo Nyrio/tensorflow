@@ -3552,13 +3552,9 @@ Status ConvertConst(OpConverterParams* params) {
   return Status::OK();
 }
 
-Status ConvertVariableV2(OpConverterParams* params) {
-  const auto& inputs = params->inputs;
+template <typename T>
+Status ConvertVariableV2Aux(OpConverterParams* params) {
   const auto& node_def = params->node_def;
-  if (!inputs.empty()) {
-    return errors::InvalidArgument(
-        "VariableV2 node is expected to have empty input list");
-  }
 
   DataType dtype;
   TF_RETURN_IF_ERROR(GetNodeAttr(AttrSlice(node_def), "dtype", &dtype));
@@ -3566,19 +3562,19 @@ Status ConvertVariableV2(OpConverterParams* params) {
   TF_RETURN_IF_ERROR(GetNodeAttr(AttrSlice(node_def), "shape", &shape_proto));
   const TensorShape shape(shape_proto);
   string shared_name;
-  TF_RETURN_IF_ERROR(GetNodeAttr(AttrSlice(node_def), "shared_name", &shared_name));
+  TF_RETURN_IF_ERROR(
+      GetNodeAttr(AttrSlice(node_def), "shared_name", &shared_name));
   string container;
   if (!TryGetNodeAttr(AttrSlice(node_def), "container", &container))
-      container = "";
+    container = "";
   const string name = node_def.name();
 
   // Create shaped weights as output.
-  // TODO: non fp32 types (switch + template)
-  Tensor tensor(DataType::DT_FLOAT, shape);
-  auto tensor_flat = tensor.flat<float>();
+  Tensor tensor(dtype, shape);
+  auto tensor_flat = tensor.flat<T>();
   if (params->validation_only) {
     for (int64_t i = 0; i < tensor_flat.size(); i++) {
-      tensor_flat(i) = 4;
+      tensor_flat(i) = T(0.0f);
     }
   } else {
     auto ctx = params->converter->context();
@@ -3595,19 +3591,19 @@ Status ConvertVariableV2(OpConverterParams* params) {
     // Create function definition.
     string func_name = name + "/func";
     FunctionDef fdef = FunctionDefHelper::Define(
-        func_name,       // Name
-        {},              // Args
-        {"out: float"},  // Returns
-        {},              // Attr def
+        func_name,                                          // Name
+        {},                                                 // Args
+        {strings::StrCat("out: ", DataTypeString(dtype))},  // Returns
+        {},                                                 // Attr def
         // Nodes
         {{{name},
           "VariableV2",
           {},
-          {{"dtype", DT_FLOAT},
+          {{"dtype", dtype},
            {"shape", shape_proto},
            {"container", container},
            {"shared_name", shared_name}}},
-         {{"out"}, "Identity", {name}, {{"T", DT_FLOAT}}}});
+         {{"out"}, "Identity", {name}, {{"T", dtype}}}});
 
     // Add function definition to the library.
     lib_def->AddFunctionDef(fdef);
@@ -3625,10 +3621,8 @@ Status ConvertVariableV2(OpConverterParams* params) {
     opts.rendezvous = ctx->rendezvous();
     opts.cancellation_manager = ctx->cancellation_manager();
     opts.runner = ctx->runner();
-    // TODO: figure out these options
 
     std::vector<Tensor> args;  // empty
-    // TODO: figure out why preventing this memory leak segfaults...
     std::vector<Tensor>* rets = new std::vector<Tensor>();
     std::unique_ptr<std::vector<Tensor>> outputs_wrapper(rets);
 
@@ -3646,17 +3640,13 @@ Status ConvertVariableV2(OpConverterParams* params) {
                                                   ->GpuStreamMemberHack()));
 
     auto ret =
-        cudaMemcpyAsync(tensor_flat.data(), rets->at(0).flat<float>().data(),
-                        rets->at(0).NumElements() * sizeof(float),
+        cudaMemcpyAsync(tensor_flat.data(), rets->at(0).flat<T>().data(),
+                        rets->at(0).NumElements() * sizeof(T),
                         cudaMemcpyDeviceToHost, *stream);
     if (ret != 0) {
       return errors::Internal("Could not copy the variable ", name);
     }
     cudaStreamSynchronize(*stream);
-
-    // TODO: error checking
-
-    // TODO: remove function definition from library?
   }
 
   TRT_ShapedWeights weights;
@@ -3667,6 +3657,28 @@ Status ConvertVariableV2(OpConverterParams* params) {
     params->outputs->push_back(TRT_TensorOrWeights(weights));
   }
   return Status::OK();
+}
+
+Status ConvertVariableV2(OpConverterParams* params) {
+  const auto& inputs = params->inputs;
+  const auto& node_def = params->node_def;
+  if (!inputs.empty()) {
+    return errors::InvalidArgument(
+        "VariableV2 node is expected to have empty input list");
+  }
+
+  DataType dtype;
+  TF_RETURN_IF_ERROR(GetNodeAttr(AttrSlice(node_def), "dtype", &dtype));
+
+  switch (dtype) {
+    case DT_FLOAT:
+      return ConvertVariableV2Aux<float>(params);
+    case DT_HALF:
+      return ConvertVariableV2Aux<Eigen::half>(params);
+    default:
+      return errors::Unimplemented("Data type ", DataTypeString(dtype),
+                                   " is not supported for VariableV2.");
+  }
 }
 
 Status ConvertIdentity(OpConverterParams* params) {

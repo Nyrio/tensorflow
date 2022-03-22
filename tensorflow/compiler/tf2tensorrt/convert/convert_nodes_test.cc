@@ -2244,6 +2244,7 @@ void TestConvertVariableV2(OpConverterTest* test) {
 
 TEST_F(OpConverterTest, ConvertVariableV2) {
   TestConvertVariableV2<DT_FLOAT, float>(this);
+  TestConvertVariableV2<DT_HALF, Eigen::half>(this);
 }
 
 template <DataType dtype, typename InputCType, typename OutputCType>
