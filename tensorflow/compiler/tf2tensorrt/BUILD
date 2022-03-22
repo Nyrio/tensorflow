@@ -778,6 +778,7 @@ tf_cuda_cc_test(
         "//tensorflow/core:lib",
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/core/framework:tensor_testutil",
+        "//tensorflow/core/kernels:function_ops",
         "//tensorflow/core/kernels:identity_op",
         "//tensorflow/core/kernels:resource_variable_ops",
         "//tensorflow/core:test",
