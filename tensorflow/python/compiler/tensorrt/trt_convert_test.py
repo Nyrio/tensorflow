@@ -27,6 +27,7 @@ from tensorflow.compiler.tf2tensorrt.utils.trt_engine_instance_pb2 import TRTEng
 from tensorflow.core.framework import graph_pb2
 from tensorflow.core.protobuf import config_pb2
 from tensorflow.python.compiler.tensorrt import trt_convert
+from tensorflow.python.compiler.tensorrt import utils as trt_utils
 from tensorflow.python.eager import def_function
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors
@@ -1048,12 +1049,12 @@ class TrtConvertTest(test_util.TensorFlowTestCase, parameterized.TestCase):
     conv_params=trt_convert.TrtConversionParams(
         precision_mode='FP16', minimum_segment_size=3,
         max_workspace_size_bytes=12*1<<30, maximum_cached_engines=1)
-    converter = trt_convert.TrtGraphConverterV2(
-        input_saved_model_dir=model_dir, conversion_params=conv_params,
-        use_dynamic_shape=True,
-        dynamic_shape_profile_strategy="Optimal",
-        freeze=False,
-    )
+    with trt_utils.tf_trt_experimental_scope("disable_graph_freezing"):
+      converter = trt_convert.TrtGraphConverterV2(
+          input_saved_model_dir=model_dir, conversion_params=conv_params,
+          use_dynamic_shape=True,
+          dynamic_shape_profile_strategy="Optimal"
+      )
     converter.convert()
 
     # Build and save the converted model.

@@ -1061,7 +1061,6 @@ class TrtGraphConverterV2(object):
                maximum_cached_engines=1,
                use_calibration=True,
                allow_build_at_runtime=True,
-               freeze=True,
                conversion_params=None):
     """Initialize the converter.
 
@@ -1101,7 +1100,6 @@ class TrtGraphConverterV2(object):
         runtime if no prebuilt TensorRT engine can be found that can handle the
         given inputs during runtime, then a new TensorRT engine is built at
         runtime if allow_build_at_runtime=True, and otherwise native TF is used.
-      freeze: whether to freeze or only inline the model before conversion.
       conversion_params: a TrtConversionParams instance (deprecated).
 
     Raises:
@@ -1127,7 +1125,8 @@ class TrtGraphConverterV2(object):
     self._input_saved_model_signature_key = (
         input_saved_model_signature_key or
         signature_constants.DEFAULT_SERVING_SIGNATURE_DEF_KEY)
-    self.freeze = freeze
+    self.freeze = not trt_utils.is_experimental_feature_activated(
+        "disable_graph_freezing")
 
     self._need_calibration = ((
         (conversion_params.precision_mode == TrtPrecisionMode.INT8) or
