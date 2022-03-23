@@ -1060,9 +1060,9 @@ class TrtConvertTest(test_util.TensorFlowTestCase, parameterized.TestCase):
     # Build and save the converted model.
     input_shapes = [[(4, 1, 1), (4, 1, 1)]]
     def input_fn():
-        for shapes in input_shapes:
-            # return a list of input tensors
-            yield [np.ones(shape=shape).astype(np.float32) for shape in shapes]
+      for shapes in input_shapes:
+        # return a list of input tensors
+        yield [np.ones(shape=shape).astype(np.float32) for shape in shapes]
     converter.build(input_fn)
     converter.save(trt_model_dir)
 
