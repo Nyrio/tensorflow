@@ -280,6 +280,9 @@ class Converter {
   Status AddInputTensor(const string& name, nvinfer1::DataType dtype,
                         const nvinfer1::Dims& dims, int batch_size);
 
+  // Add input resource to the TRT network with given 'name'.
+  Status AddInputResource(const string& name, const ResourceHandle& resource);
+
   // Mark the tensors with names specified by source_tensor_name as output of
   // the TRT network, and set their names in the TRT network as dest_node_name.
   Status RenameAndMarkOutputTensors(
