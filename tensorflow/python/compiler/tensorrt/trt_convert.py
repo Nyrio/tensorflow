@@ -922,10 +922,10 @@ def _construct_function_from_graph_def(func, graph_def, frozen_func=None):
   # TODO: less assumptions about captures being the same as original function?
   captures = {
     t2.name.split(":")[0]: t1
-    for _, (t1, t2) in func.graph._captures.items()}
+    for _, (t1, t2) in frozen_func.graph._captures.items()}
   new_func = wrap_function.function_from_graph_def(
-      graph_def, [tensor.name for tensor in func.inputs],
-      [tensor.name for tensor in func.outputs], captures)
+      graph_def, [tensor.name for tensor in frozen_func.inputs],
+      [tensor.name for tensor in frozen_func.outputs], captures)
   new_func.graph.structured_outputs = nest.pack_sequence_as(
       func.graph.structured_outputs, new_func.graph.structured_outputs)
 
@@ -1264,7 +1264,6 @@ class TrtGraphConverterV2(object):
 
     self._saved_model = load.load(self._input_saved_model_dir,
                                   self._input_saved_model_tags)
-    print(list(self._saved_model.signatures.keys()))
     func = self._saved_model.signatures[self._input_saved_model_signature_key]
     if self.freeze:
       frozen_func = convert_to_constants.convert_variables_to_constants_v2(func)
