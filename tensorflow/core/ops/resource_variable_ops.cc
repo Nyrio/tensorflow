@@ -30,15 +30,24 @@ namespace tensorflow {
 namespace {
 
 Status ReadVariableShapeFn(InferenceContext* c) {
-  std::vector<ShapeAndType> shape_and_type;
-  TF_RETURN_IF_ERROR(
-      shape_inference::ValidateVariableResourceHandle(c, &shape_and_type));
-  c->set_output(0, shape_and_type[0].shape);
-  if (shape_and_type[0].dtype == DT_VARIANT && shape_and_type.size() > 1) {
-    std::vector<ShapeAndType> variant_shape_and_type;
-    std::copy(shape_and_type.begin() + 1, shape_and_type.end(),
-              std::back_inserter(variant_shape_and_type));
-    c->set_output_handle_shapes_and_types(0, variant_shape_and_type);
+  // Hack to return annotated shape if found.
+  PartialTensorShape p;
+  Status annotation_found_status = c->GetAttr("_shape", &p);
+  if (annotation_found_status.ok()) {
+    ShapeHandle s;
+    TF_RETURN_IF_ERROR(c->MakeShapeFromPartialTensorShape(p, &s));
+    c->set_output(0, s);
+  } else {
+    std::vector<ShapeAndType> shape_and_type;
+    TF_RETURN_IF_ERROR(
+        shape_inference::ValidateVariableResourceHandle(c, &shape_and_type));
+    c->set_output(0, shape_and_type[0].shape);
+    if (shape_and_type[0].dtype == DT_VARIANT && shape_and_type.size() > 1) {
+      std::vector<ShapeAndType> variant_shape_and_type;
+      std::copy(shape_and_type.begin() + 1, shape_and_type.end(),
+                std::back_inserter(variant_shape_and_type));
+      c->set_output_handle_shapes_and_types(0, variant_shape_and_type);
+    }
   }
   return Status::OK();
 }

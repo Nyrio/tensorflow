@@ -324,7 +324,8 @@ Status TrtShapeOptimizationProfile::AddProfiles(
   // Create a vector of optimization profiles.
   for (int i = 0; i < profiles_.size(); i++) {
     auto* optProfile = builder->createOptimizationProfile();
-    Status status = profiles_[i].SetDimensions(network, optProfile);
+    Status status =
+        profiles_[i].SetDimensions(network, optProfile, input_mask_);
     if (!status.ok()) {
       return status;
     }
@@ -529,6 +530,7 @@ Status TrtShapeOptimizationProfile::SetPrunedMask(
 
 Status TrtShapeOptimizationProfile::RestoreProfiles(
     const nvinfer1::ICudaEngine* engine, int n_network_inputs) {
+  /// TODO: handle resource inputs here
   need_profiles_ = false;
   if (!engine) {
     // We do not need to restore profiles for an empty engine.

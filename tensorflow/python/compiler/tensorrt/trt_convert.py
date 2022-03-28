@@ -911,16 +911,39 @@ def _construct_function_from_graph_def(func, graph_def, frozen_func=None):
   """Rebuild function from graph_def."""
   if frozen_func is None:
     frozen_func = func
-  rebuilt_func = wrap_function.function_from_graph_def(
-      graph_def, [tensor.name for tensor in frozen_func.inputs],
-      [tensor.name for tensor in frozen_func.outputs])
-  rebuilt_func.graph.structured_outputs = nest.pack_sequence_as(
-      func.graph.structured_outputs, rebuilt_func.graph.structured_outputs)
+
+  # If a function is converted, then the TF context contains the original
+  # function while the converted_graph_def contains the converted function.
+  # Remove the original function from the TF context in this case.
+  for f in graph_def.library.function:
+    while context.context().has_function(f.signature.name):
+      context.context().remove_function(f.signature.name)
+
+  # TODO: less assumptions about captures being the same as original function?
+  captures = {
+    t2.name.split(":")[0]: t1
+    for _, (t1, t2) in func.graph._captures.items()}
+  new_func = wrap_function.function_from_graph_def(
+      graph_def, [tensor.name for tensor in func.inputs],
+      [tensor.name for tensor in func.outputs], captures)
+  new_func.graph.structured_outputs = nest.pack_sequence_as(
+      func.graph.structured_outputs, new_func.graph.structured_outputs)
+
   # Copy structured input signature from original function (used during
   # serialization)
-  rebuilt_func.graph.structured_input_signature = (
+  new_func.graph.structured_input_signature = (
       func.structured_input_signature)
-  return rebuilt_func
+
+  # Manually propagate shape for input tensors where the shape is not correctly
+  # propagated. Scalars shapes are lost when wrapping the function.
+  # TODO: is this step actually necessary?
+  inputs_map = {
+      tensor.name: tensor for tensor in func.inputs
+  }
+  for input_tensor in new_func.inputs:
+    input_tensor.set_shape(inputs_map[input_tensor.name].shape)
+
+  return new_func
 
 
 def _apply_inlining(func):
@@ -930,6 +953,25 @@ def _apply_inlining(func):
 
   graph_def = convert_to_constants._run_inline_graph_optimization(
     func, lower_control_flow, aggressive_inlining)
+
+  # Annotate ReadVariableOp with shape
+  # TODO: separate function?
+  ph_shape_map = {}
+  for ph, var in zip(func.graph.internal_captures, func.variables):
+      ph_shape_map[ph.name] = var.shape
+  # Construct a mapping of node names to nodes
+  # TODO: better way? in graph
+  name_to_node = {node.name: node for node in graph_def.node}
+  # Go through all the ReadVariableOp nodes in the graph def
+  for node in graph_def.node:
+    if node.op == "ReadVariableOp" or node.op == "ResourceGather":
+      node_ = node
+      # Go up the chain of identities to find a placeholder
+      # TODO: what if we don't find a placeholder?
+      while name_to_node[node_.input[0]].op == "Identity":
+        node_ = name_to_node[node_.input[0]]
+      shape = ph_shape_map[node_.input[0] + ":0"]
+      node.attr["_shape"].shape.CopyFrom(shape.as_proto())
 
   return _construct_function_from_graph_def(func, graph_def)
 
@@ -1222,6 +1264,7 @@ class TrtGraphConverterV2(object):
 
     self._saved_model = load.load(self._input_saved_model_dir,
                                   self._input_saved_model_tags)
+    print(list(self._saved_model.signatures.keys()))
     func = self._saved_model.signatures[self._input_saved_model_signature_key]
     if self.freeze:
       frozen_func = convert_to_constants.convert_variables_to_constants_v2(func)
@@ -1239,14 +1282,6 @@ class TrtGraphConverterV2(object):
 
     # Run TRT optimizer in Grappler to convert the graph.
     self._converted_graph_def = self._run_conversion(grappler_meta_graph_def)
-    # If a function is converted, then the TF context contains the original
-    # function while the converted_graph_def contains the converted function.
-    # Remove the original function from the TF context in this case.
-    for f in self._converted_graph_def.library.function:
-      while context.context().has_function(f.signature.name):
-        logging.info("Removing original function %s from the context",
-                     f.signature.name)
-        context.context().remove_function(f.signature.name)
     self._converted_func = _construct_function_from_graph_def(
         func, self._converted_graph_def, frozen_func)
 
