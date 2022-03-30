@@ -652,6 +652,7 @@ tf_cuda_library(
         "convert/ops/slice_ops.cc",
         "convert/ops/tile.cc",
         "convert/ops/unary_ops.cc",
+        "convert/ops/variable_ops.cc",
         "convert/trt_optimization_pass.cc",
     ],
     hdrs = [

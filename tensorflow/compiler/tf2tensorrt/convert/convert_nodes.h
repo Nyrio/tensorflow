@@ -497,6 +497,10 @@ class Converter {
   friend class OpConverterTest;
 };
 
+// Converts a TensorFlow tensor to TRT shaped weights.
+Status TfTensorToTrtWeights(const Tensor& tensor, TrtWeightStore* weight_store,
+                            TRT_ShapedWeights* weights);
+
 // Converts 'input' of 'node_def' into 'tensor' with shape specified by 'dims'
 // (which doesn't contain the batch dimension).
 //
