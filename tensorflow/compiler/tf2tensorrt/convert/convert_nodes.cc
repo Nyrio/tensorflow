@@ -43,7 +43,6 @@ limitations under the License.
 #include "tensorflow/compiler/tf2tensorrt/utils/trt_logger.h"
 #include "tensorflow/compiler/tf2tensorrt/utils/trt_shape_optimization_profiles.h"
 #include "tensorflow/core/common_runtime/graph_constructor.h"
-#include "tensorflow/core/common_runtime/process_function_library_runtime.h"
 #include "tensorflow/core/framework/node_def.pb.h"  // NOLINT
 #include "tensorflow/core/framework/node_def_builder.h"
 #include "tensorflow/core/framework/tensor.pb.h"  // NOLINT
@@ -65,7 +64,6 @@ limitations under the License.
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/core/platform/protobuf.h"
-#include "tensorflow/core/platform/stream_executor.h"
 #include "tensorflow/core/platform/tensor_coding.h"
 #include "tensorflow/core/platform/tensor_float_32_utils.h"
 #include "tensorflow/core/platform/types.h"
@@ -3606,133 +3604,16 @@ Status ConvertConst(OpConverterParams* params) {
   return Status::OK();
 }
 
-template <typename T>
-Status ConvertVariableV2Aux(OpConverterParams* params) {
-  const auto& node_def = params->node_def;
+Status ConvertIdentity(OpConverterParams* params) {
+  // TODO(tmorris): TRT's Identity layer does not get optimized away as of TRT
+  // 5.0, however once we know that it does it would be nice to use that
+  // instead.
+  if (params->validation_only) return Status::OK();
 
-  DataType dtype;
-  TF_RETURN_IF_ERROR(GetNodeAttr(AttrSlice(node_def), "dtype", &dtype));
-  TensorShapeProto shape_proto;
-  TF_RETURN_IF_ERROR(GetNodeAttr(AttrSlice(node_def), "shape", &shape_proto));
-  const TensorShape shape(shape_proto);
-  string shared_name;
-  TF_RETURN_IF_ERROR(
-      GetNodeAttr(AttrSlice(node_def), "shared_name", &shared_name));
-  string container;
-  if (!TryGetNodeAttr(AttrSlice(node_def), "container", &container))
-    container = "";
-  const string name = node_def.name();
-
-  // Create shaped weights as output.
-  Tensor tensor(dtype, shape);
-  auto tensor_flat = tensor.flat<T>();
-  if (params->validation_only) {
-    for (int64_t i = 0; i < tensor_flat.size(); i++) {
-      tensor_flat(i) = T(0.0f);
-    }
-  } else {
-    auto ctx = params->converter->context();
-    CHECK(ctx);
-    auto lib = ctx->function_library();
-
-    // Clone function library runtime to add functions.
-    std::unique_ptr<FunctionLibraryDefinition> lib_def;
-    std::unique_ptr<ProcessFunctionLibraryRuntime> lib_pflr;
-    FunctionLibraryRuntime* lib_clone;  // TODO: destroy?
-
-    TF_RETURN_IF_ERROR(lib->Clone(&lib_def, &lib_pflr, &lib_clone));
-
-    // Create function definition.
-    string func_name = name + "/func";
-    FunctionDef fdef = FunctionDefHelper::Define(
-        func_name,                                          // Name
-        {},                                                 // Args
-        {strings::StrCat("out: ", DataTypeString(dtype))},  // Returns
-        {},                                                 // Attr def
-        // Nodes
-        {{{name},
-          "VariableV2",
-          {},
-          {{"dtype", dtype},
-           {"shape", shape_proto},
-           {"container", container},
-           {"shared_name", shared_name}}},
-         {{"out"}, "Identity", {name}, {{"T", dtype}}}});
-
-    // Add function definition to the library.
-    lib_def->AddFunctionDef(fdef);
-
-    // Instanciate function.
-    FunctionLibraryRuntime::Handle func_handle;
-    FunctionLibraryRuntime::InstantiateOptions inst_ops;
-    inst_ops.state_handle = "";
-    inst_ops.target = ctx->device()->name();
-    AttrValueMap attr_list;
-    TF_RETURN_IF_ERROR(lib_clone->Instantiate(func_name, AttrSlice(&attr_list),
-                                              inst_ops, &func_handle));
-
-    FunctionLibraryRuntime::Options opts;
-    opts.rendezvous = ctx->rendezvous();
-    opts.cancellation_manager = ctx->cancellation_manager();
-    opts.runner = ctx->runner();
-
-    std::vector<Tensor> args;  // empty
-    std::vector<Tensor>* rets = new std::vector<Tensor>();
-    std::unique_ptr<std::vector<Tensor>> outputs_wrapper(rets);
-
-    // Run the new function synchronously.
-    TF_RETURN_IF_ERROR(lib_clone->RunSync(opts, func_handle, args, rets));
-
-    CHECK(ctx->op_device_context());
-    CHECK(ctx->op_device_context()->stream());
-
-    // Copy tensor.
-    const cudaStream_t* stream = CHECK_NOTNULL(
-        reinterpret_cast<const cudaStream_t*>(ctx->op_device_context()
-                                                  ->stream()
-                                                  ->implementation()
-                                                  ->GpuStreamMemberHack()));
-
-    auto ret =
-        cudaMemcpyAsync(tensor_flat.data(), rets->at(0).flat<T>().data(),
-                        rets->at(0).NumElements() * sizeof(T),
-                        cudaMemcpyDeviceToHost, *stream);
-    if (ret != 0) {
-      return errors::Internal("Could not copy the variable ", name);
-    }
-    cudaStreamSynchronize(*stream);
-  }
-
-  TRT_ShapedWeights weights;
-  TF_RETURN_IF_ERROR(
-      TfTensorToTrtWeights(tensor, params->weight_store, &weights));
-
-  if (params->outputs != nullptr) {
-    params->outputs->push_back(TRT_TensorOrWeights(weights));
+  for (int i = 0; i < params->inputs.size(); i++) {
+    params->outputs->push_back(params->inputs.at(i));
   }
   return Status::OK();
-}
-
-Status ConvertVariableV2(OpConverterParams* params) {
-  const auto& inputs = params->inputs;
-  const auto& node_def = params->node_def;
-  if (!inputs.empty()) {
-    return errors::InvalidArgument(
-        "VariableV2 node is expected to have empty input list");
-  }
-
-  DataType dtype;
-  TF_RETURN_IF_ERROR(GetNodeAttr(AttrSlice(node_def), "dtype", &dtype));
-
-  switch (dtype) {
-    case DT_FLOAT:
-      return ConvertVariableV2Aux<float>(params);
-    case DT_HALF:
-      return ConvertVariableV2Aux<Eigen::half>(params);
-    default:
-      return errors::Unimplemented("Data type ", DataTypeString(dtype),
-                                   " is not supported for VariableV2.");
-  }
 }
 
 Status ConvertReadVariableOp(OpConverterParams* params) {
