@@ -112,12 +112,11 @@ class ConvertVariableV2 : public OpConverterBase<ConvertVariableV2> {
     CHECK(ctx);
     auto lib = ctx->function_library();
 
-    // Clone function library runtime to add functions.
+    // Clone function library runtime in order to get a mutable library
+    // definition to add and run a function with the variable operation.
     std::unique_ptr<FunctionLibraryDefinition> lib_def;
     std::unique_ptr<ProcessFunctionLibraryRuntime> lib_pflr;
-    FunctionLibraryRuntime* lib_clone;  // TODO: destroy?
-    // TODO: don't clone?
-
+    FunctionLibraryRuntime* lib_clone;  // Not owned.
     TF_RETURN_IF_ERROR(lib->Clone(&lib_def, &lib_pflr, &lib_clone));
 
     // Create function definition.
