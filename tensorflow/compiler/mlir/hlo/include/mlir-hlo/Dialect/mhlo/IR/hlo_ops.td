@@ -142,6 +142,20 @@ class HLO_UnaryElementwiseOp<string mnemonic, list<Trait> traits,
     bool inferInputOutputShapeEquality(int input, int output) {
       return true;
     }
+    // Replace the strict default implementation with one that allows
+    // for different sparsity encodings during the is-same test.
+    //
+    // TODO(ajcbik): perhaps a bit expensive to construct types just
+    //               to do the comparison: rewrite into a direct test
+    //
+    static bool isCompatibleReturnTypes(TypeRange l, TypeRange r) {
+      if (l.size() != r.size()) return false;
+      for (auto it : llvm::zip(l, r))
+        if (getTypeWithoutSparseEncoding(std::get<0>(it)) !=
+            getTypeWithoutSparseEncoding(std::get<1>(it)))
+          return false;
+      return true;
+    }
   }];
 }
 
@@ -431,7 +445,7 @@ def HLO_TanhOp: HLO_UnaryElementwiseOp<"tanh",
 //===----------------------------------------------------------------------===//
 // See https://www.tensorflow.org/xla/operation_semantics#element-wise_binary_arithmetic_operations
 
-class HLO_BinaryElementwiseOp<string mnemonic, list<Trait> traits> :
+class HLO_BinaryElementwiseOpNoAssembly<string mnemonic, list<Trait> traits> :
     HLO_Op<mnemonic, traits # [InferShapedTypeOpInterface,
     InferShapeEqualityOpInterface, SameOperandsAndResultShape, Elementwise]> {
   let arguments = (ins
@@ -462,7 +476,19 @@ class HLO_BinaryElementwiseOp<string mnemonic, list<Trait> traits> :
   }];
 
   let results = (outs HLO_Tensor:$result);
-  let assemblyFormat = "operands attr-dict `:` type($result)";
+}
+
+class HLO_BinaryElementwiseOp<string mnemonic, list<Trait> traits> :
+    HLO_BinaryElementwiseOpNoAssembly<mnemonic, traits> {
+  let extraClassDefinition = [{
+    ParseResult $cppClass::parse(OpAsmParser &parser, OperationState &result) {
+      return ::mlir::mhlo::parseBinaryOp(parser, result);
+    }
+    void $cppClass::print(OpAsmPrinter &p) {
+      ::mlir::mhlo::printBinaryOp(getOperation(), p);
+    }
+  }];
+  let hasCustomAssemblyFormat = 1;
 }
 
 def HLO_AddOp : HLO_BinaryElementwiseOp<"add",
@@ -487,7 +513,7 @@ def HLO_Atan2Op : HLO_BinaryElementwiseOp<"atan2",
     https://www.tensorflow.org/xla/operation_semantics#element-wise_binary_arithmetic_operations.
   }];
 }
-def HLO_ComplexOp: HLO_BinaryElementwiseOp<"complex",
+def HLO_ComplexOp: HLO_BinaryElementwiseOpNoAssembly<"complex",
     [NoSideEffect, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
   let summary = "Complex operator";
   let description = [{
@@ -1559,7 +1585,8 @@ def HLO_CrossReplicaSumOp : HLO_Op<"cross-replica-sum",
   let results = (outs HLO_Tensor);
 }
 
-def HLO_CustomCallOp: HLO_Op<"custom_call", []> {
+def HLO_CustomCallOp: HLO_Op<"custom_call",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "CustomCall operator";
   let description = [{
     A custom call invokes code external to XLA. The `args` are passed to the
@@ -1885,6 +1912,7 @@ def HLO_SelectOp: HLO_Op<"select", [NoSideEffect, HLO_BroadcastingElementwise,
 
   let hasFolder = 1;
   let hasVerifier = 1;
+  let hasCanonicalizer = 1;
 
   let extraClassDeclaration = [{
     static bool isCompatibleReturnTypes(TypeRange l, TypeRange r) {
@@ -1919,6 +1947,7 @@ def HLO_SelectAndScatterOp: HLO_Op<"select_and_scatter",
 
   let results = (outs HLO_Tensor);
 
+  let hasVerifier = 1;
   let hasCustomHLOConverter = 1;
 }
 

@@ -84,7 +84,7 @@ def is_experimental_feature_activated(feature_name):
   """
   return (
     feature_name in
-    os.environ.get("TF_TRT_EXPERIMENTAL_FEATURES", default="")
+    os.environ.get("TF_TRT_EXPERIMENTAL_FEATURES", default="").split(",")
   )
 
 @contextmanager

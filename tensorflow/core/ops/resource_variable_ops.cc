@@ -13,6 +13,8 @@
 // limitations under the License.
 // ============================================================================
 
+#include <algorithm>
+
 #include "tensorflow/core/framework/common_shape_fns.h"
 #include "tensorflow/core/framework/function.h"
 #include "tensorflow/core/framework/node_def_util.h"
@@ -30,7 +32,11 @@ namespace tensorflow {
 namespace {
 
 Status ReadVariableShapeFn(InferenceContext* c) {
-  // Hack to return annotated shape if found.
+  // The user can add a "_shape" atribute to ReadVariableOp nodes. It is
+  // useful for inferring shapes in a function, when no shape information
+  // is passed about input resources. The user can annotate the graph using
+  // the variable capture list of the function.
+  // If the "_shape" attribute is found, it is used to set the output shape.
   PartialTensorShape p;
   Status annotation_found_status = c->GetAttr("_shape", &p);
   if (annotation_found_status.ok()) {

@@ -66,6 +66,7 @@ visibility = [
     "//third_party/py/tensorflow_gnn:__subpackages__",
     "//third_party/py/tensorflow_numerics:__subpackages__",
     "//third_party/py/tensorflow_privacy:__subpackages__",
+    "//third_party/reverb:__subpackages__",
 ]
 
 package(
@@ -156,10 +157,7 @@ py_library(
         ":control_flow_ops",
         ":cudnn_rnn_ops_gen",
         ":distributed_framework_test_lib",
-        # copybara:uncomment_begin(google-only)
-        # # FIXME(b/189332820): Link the target when it is available on OSS.
-        # ":dtensor",
-        # copybara:uncomment_end
+        ":dtensor",
         ":filesystem_ops",
         ":functional_ops",
         ":gradient_checker",
@@ -196,7 +194,6 @@ py_library(
         ":training",
         ":weights_broadcast_ops",
         ":while_v2",
-        "//third_party/py/numpy",
         "//tensorflow/core:protos_all_py",
         "//tensorflow/lite/python:analyzer",
         "//tensorflow/lite/python:lite",
@@ -266,6 +263,7 @@ py_library(
         "//tensorflow/python/util:_pywrap_tfprof",
         "//tensorflow/python/util:_pywrap_transform_graph",
         "//tensorflow/python/util:_pywrap_util_port",
+        "//third_party/py/numpy",
     ],
 )
 
@@ -3317,6 +3315,7 @@ pywrap_tensorflow_macro(
         "//tensorflow/core/profiler/rpc/client:profiler_client_impl",
         "//tensorflow/core/profiler/internal:print_model_analysis",
         "//tensorflow/core/profiler/internal/cpu:python_tracer",
+        "//tensorflow/dtensor/cc:dtensor_device_cc",
         "//tensorflow/distribute/experimental/rpc/kernels:rpc_ops",
         "//tensorflow/lite/delegates/flex:delegate",
         "//tensorflow/lite/kernels/shim:tf_kernel_shim",
@@ -3423,6 +3422,7 @@ filegroup(
         "//tensorflow/stream_executor:stream_executor_pimpl",  # stat_summarizer
         "//tensorflow/tools/graph_transforms:transform_graph_lib",  # transform_graph
         "//tensorflow/compiler/mlir/quantization/tensorflow/python:quantize_model_cc",  # quantization
+        "//tensorflow/dtensor/cc:dtensor_device_cc",  # DTensor
     ] + if_xla_available([
         "//tensorflow/compiler/aot:tfcompile_lib",  # tfcompile
         "//tensorflow/compiler/xla:status_macros",  # tfcompile
@@ -4586,17 +4586,14 @@ alias(
     actual = "//tensorflow/python/layers:layers",
 )
 
-# copybara:uncomment_begin(google-only)
-# # FIXME(b/189332820): Link the target when it is available on OSS.
-# py_library(
-#     name = "dtensor",
-#     deps = [
-#         "//tensorflow/dtensor/python:core",
-#         "//tensorflow/dtensor/python:mesh_util",
-#         "//tensorflow/dtensor/python:tpu_util",
-#     ],
-# )
-# copybara:uncomment_end
+py_library(
+    name = "dtensor",
+    deps = [
+        "//tensorflow/dtensor/python:core",
+        "//tensorflow/dtensor/python:mesh_util",
+        "//tensorflow/dtensor/python:tpu_util",
+    ],
+)
 
 py_library(
     name = "learning_rate_decay",
