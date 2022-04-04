@@ -1612,9 +1612,8 @@ class VariableOpConverterTest : public OpConverterTest {
      OpConverterTest::Reset(precision_mode_to_test, trt_mode, context_.get());
    }
 
-   void CreateContext(const NodeDef& node_def,
-                      gtl::InlinedVector<TensorValue, 4>& inputs,
-                      OpKernel** kernel, OpKernelContext** context) {
+   void CreateContext(const NodeDef& node_def, OpKernel** kernel,
+                      OpKernelContext** context) {
      std::unique_ptr<Device> device_(
          DeviceFactory::NewDevice("GPU", {}, "/job:a/replica:0/task:0"));
      Device* device_ptr = device_.get();
@@ -1660,7 +1659,7 @@ class VariableOpConverterTest : public OpConverterTest {
      params_.op_kernel = op_kernel_.get();
      params_.resource_manager = resource_mgr;
      params_.frame_iter = FrameAndIter(0, 0);
-     params_.inputs = &inputs;
+     params_.inputs = &inputs_;
      params_.step_container = step_container_.get();
      params_.function_library = flib;
      params_.slice_reader_cache = slice_reader_cache_wrapper_.get();
@@ -1697,6 +1696,7 @@ class VariableOpConverterTest : public OpConverterTest {
    std::unique_ptr<OpKernel> op_kernel_;
    std::unique_ptr<OpKernelContext> context_;
    std::shared_ptr<const NodeProperties> props_;
+   gtl::InlinedVector<TensorValue, 4> inputs_;
 };
 
 // General test parameters to be used with ops that take a single input tensor.
@@ -2141,10 +2141,9 @@ void TestConvertVariableV2(VariableOpConverterTest* test) {
             .Attr("shared_name", p.shared_name)
             .Finalize(&node_def));
 
-    gtl::InlinedVector<TensorValue, 4> inputs;
-    OpKernel *kernel;
+    OpKernel* kernel;
     OpKernelContext* context;
-    test->CreateContext(node_def, inputs, &kernel, &context);
+    test->CreateContext(node_def, &kernel, &context);
 
     test->Reset(TrtPrecisionMode::FP32, TrtTestMode::kDynamicShape);
 
@@ -2210,8 +2209,6 @@ void TestConvertReadVariableOp(VariableOpConverterTest* test) {
       {"box", "var", {8, 16}, 0.001, Status::OK()}};
   for (auto p : test_param) {
     // Create node definition.
-    // auto handle_ph =
-    //     ops::Placeholder(test->scope_.WithOpName("my_handle"), DT_RESOURCE);
     NodeDefBuilder::NodeOut rvo_input = NodeDefBuilder::NodeOut(
         "my_handle", 0, DT_RESOURCE);
     NodeDef node_def;
@@ -2223,10 +2220,9 @@ void TestConvertReadVariableOp(VariableOpConverterTest* test) {
                     .Input(rvo_input)
                     .Finalize(&node_def));
 
-    gtl::InlinedVector<TensorValue, 4> inputs;
     OpKernel* kernel;
     OpKernelContext* context;
-    test->CreateContext(node_def, inputs, &kernel, &context);
+    test->CreateContext(node_def, &kernel, &context);
 
     test->Reset(TrtPrecisionMode::FP32, TrtTestMode::kDynamicShape);
 
@@ -2240,9 +2236,6 @@ void TestConvertReadVariableOp(VariableOpConverterTest* test) {
       expected_value.push_back((CType)i);
     }
 
-    // TODO: MakeRefCountingHandle instead?
-    // TODO: CreateUnowned instead?
-    
     // Create a resource handle.
     DtypeAndPartialTensorShape dtype_and_shape;
     dtype_and_shape.dtype = dtype;
@@ -2275,17 +2268,6 @@ void TestConvertReadVariableOp(VariableOpConverterTest* test) {
                           expected_value.size() * sizeof(CType),
                           cudaMemcpyHostToDevice);
     CHECK(ret == 0);
-
-    // Create a tensor holding the resource handle.
-    AllocatorAttributes attr_resource;
-    attr_resource.set_on_host(true);
-    Tensor tensor;
-    OP_REQUIRES_OK(
-        context, context->allocate_temp(DT_RESOURCE, TensorShape({}), &tensor, attr_resource));
-    tensor.scalar<ResourceHandle>()() = std::move(handle);
-
-    // Add the resource handle tensor to the op kernel inputs.
-    inputs.emplace_back(&tensor);
 
     test->RunValidationAndConversion(node_def);
     TRT_TensorOrWeights output;
