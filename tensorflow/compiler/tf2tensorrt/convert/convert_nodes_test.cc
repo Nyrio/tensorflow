@@ -1365,6 +1365,10 @@ class OpConverterTest : public ::testing::Test {
     }
   }
 
+  Status AddTensorOrWeights(const string& name, TRT_TensorOrWeights input) {
+    return converter_->AddTensorOrWeights(name, input);
+  }
+
   // Adds ITensor for both validation and conversion. The difference compared to
   // AddTestTensorWithTFDims is in the meaning of the dims parameter. To define
   // a tensor with NCHW shape, here we set dims = {C,H,W} and batch_size = N.
@@ -1585,6 +1589,8 @@ class OpConverterTest : public ::testing::Test {
   TrtUniquePtrType<nvinfer1::ICudaEngine> engine_;
   cudaStream_t stream_;
   std::unique_ptr<Allocator> tensor_buffer_allocator_;
+
+ public:
   // The scope that contains the graph being converted. Because
   // tensor_buffer_allocator_ provides the storage for tensor contents that are
   // represented as attributes for graph nodes within scope_,
@@ -1592,6 +1598,8 @@ class OpConverterTest : public ::testing::Test {
   // Therefore, scope_ comes after tensor_buffer_allocator_ in the class member
   // field list.
   Scope scope_;
+
+ protected:
   std::unordered_map<string, Output> node_inputs_;
 };
 
@@ -1604,8 +1612,9 @@ class VariableOpConverterTest : public OpConverterTest {
      OpConverterTest::Reset(precision_mode_to_test, trt_mode, context_.get());
    }
 
-   void CreateContext(const NodeDef& node_def, OpKernel** kernel,
-                      OpKernelContext** context) {
+   void CreateContext(const NodeDef& node_def,
+                      gtl::InlinedVector<TensorValue, 4>& inputs,
+                      OpKernel** kernel, OpKernelContext** context) {
      std::unique_ptr<Device> device_(
          DeviceFactory::NewDevice("GPU", {}, "/job:a/replica:0/task:0"));
      Device* device_ptr = device_.get();
@@ -1651,7 +1660,7 @@ class VariableOpConverterTest : public OpConverterTest {
      params_.op_kernel = op_kernel_.get();
      params_.resource_manager = resource_mgr;
      params_.frame_iter = FrameAndIter(0, 0);
-     params_.inputs = &inputs_;
+     params_.inputs = &inputs;
      params_.step_container = step_container_.get();
      params_.function_library = flib;
      params_.slice_reader_cache = slice_reader_cache_wrapper_.get();
@@ -1662,6 +1671,16 @@ class VariableOpConverterTest : public OpConverterTest {
      // Outputs.
      *kernel = op_kernel_.get();
      *context = context_.get();
+   }
+
+   // Add resource for resource variable op converters.
+   void AddTestResource(const string& name, const ResourceHandle& resource) {
+     // Add resource for validation.
+     node_inputs_[name] =
+         ops::Placeholder(scope_.WithOpName("my_handle"), DT_RESOURCE);
+
+     // Add resource for conversion.
+     TF_EXPECT_OK(AddTensorOrWeights(name, TRT_TensorOrWeights{resource}));
    }
 
   private:
@@ -1764,7 +1783,6 @@ class VariableOpConverterTest : public OpConverterTest {
    std::unique_ptr<OpKernel> op_kernel_;
    std::unique_ptr<OpKernelContext> context_;
    std::shared_ptr<const NodeProperties> props_;
-   gtl::InlinedVector<TensorValue, 4> inputs_;
 };
 
 // General test parameters to be used with ops that take a single input tensor.
@@ -2209,9 +2227,10 @@ void TestConvertVariableV2(VariableOpConverterTest* test) {
             .Attr("shared_name", p.shared_name)
             .Finalize(&node_def));
 
-    OpKernel* kernel;
+    gtl::InlinedVector<TensorValue, 4> inputs;
+    OpKernel *kernel;
     OpKernelContext* context;
-    test->CreateContext(node_def, &kernel, &context);
+    test->CreateContext(node_def, inputs, &kernel, &context);
 
     test->Reset(TrtPrecisionMode::FP32, TrtTestMode::kDynamicShape);
 
@@ -2258,6 +2277,113 @@ void TestConvertVariableV2(VariableOpConverterTest* test) {
 TEST_F(VariableOpConverterTest, ConvertVariableV2) {
   TestConvertVariableV2<DT_FLOAT, float>(this);
   TestConvertVariableV2<DT_HALF, Eigen::half>(this);
+}
+
+template <DataType dtype, typename CType>
+void TestConvertReadVariableOp(VariableOpConverterTest* test) {
+  struct TestParam {
+    string container;
+    string name;
+    std::vector<int> dims;
+    float epsilon;
+    Status conversion_status;
+  };
+
+  std::vector<TestParam> test_param = {
+      {"", "var0", {}, 0.001, Status::OK()},
+      {"", "var0", {64}, 0.001, Status::OK()},
+      {"", "var0", {8, 16}, 0.001, Status::OK()},
+      {"box", "var", {8, 16}, 0.001, Status::OK()}};
+  for (auto p : test_param) {
+    // Create node definition.
+    // auto handle_ph =
+    //     ops::Placeholder(test->scope_.WithOpName("my_handle"), DT_RESOURCE);
+    NodeDefBuilder::NodeOut rvo_input = NodeDefBuilder::NodeOut(
+        "my_handle", 0, DT_RESOURCE);
+    NodeDef node_def;
+    std::vector<int64_t> dims_64(p.dims.begin(), p.dims.end());
+    TensorShape shape = TensorShape(gtl::ArraySlice<int64_t>(dims_64));
+    TF_CHECK_OK(NodeDefBuilder("my_var", "ReadVariableOp")
+                    .Attr("dtype", dtype)
+                    .Attr("_shape", shape)
+                    .Input(rvo_input)
+                    .Finalize(&node_def));
+
+    gtl::InlinedVector<TensorValue, 4> inputs;
+    OpKernel* kernel;
+    OpKernelContext* context;
+    test->CreateContext(node_def, inputs, &kernel, &context);
+
+    test->Reset(TrtPrecisionMode::FP32, TrtTestMode::kDynamicShape);
+
+    // Set the value of the variable according to p.dims.
+    int var_size = std::accumulate(p.dims.begin(), p.dims.end(), 1,
+                                   std::multiplies<int>());
+    std::vector<CType> expected_value;
+    expected_value.reserve(var_size);
+    for (int i = 0; i < var_size; i++) {
+      // Set expected_value[i] = (cast)i.
+      expected_value.push_back((CType)i);
+    }
+
+    // TODO: MakeRefCountingHandle instead?
+    // TODO: CreateUnowned instead?
+    
+    // Create a resource handle.
+    DtypeAndPartialTensorShape dtype_and_shape;
+    dtype_and_shape.dtype = dtype;
+    TF_CHECK_OK(PartialTensorShape::BuildPartialTensorShape(
+        gtl::ArraySlice<int64_t>(dims_64), &dtype_and_shape.shape));
+    ResourceHandle handle = MakeResourceHandle<Var>(
+        context, p.container, p.name,
+        std::vector<DtypeAndPartialTensorShape>{dtype_and_shape});
+
+    // Create input resource with the handle.
+    test->AddTestResource("my_handle", handle);
+
+    // Create a resource with this handle.
+    /// TODO: resource destruction? Use smart pointer?
+    Var* resource = new Var(dtype);
+    CreateResource(context, handle, resource);
+
+    // Setup the tensor of the variable.
+    // We allocate the tensor in the temporary memory. Note that creating a
+    // tensor in this scope and sharing the underlying storage by copy would
+    // lead to double destruction.
+    AllocatorAttributes attr_value;
+    attr_value.set_gpu_compatible(true);
+    attr_value.set_nic_compatible(true);
+    context->allocate_temp(dtype, shape, resource->tensor(), attr_value);
+    // The tensor is allocated on GPU. We copy the values from the CPU.
+    auto tensor_flat = resource->tensor()->flat<CType>();
+    CHECK(tensor_flat.data());
+    auto ret = cudaMemcpy(tensor_flat.data(), expected_value.data(),
+                          expected_value.size() * sizeof(CType),
+                          cudaMemcpyHostToDevice);
+    CHECK(ret == 0);
+
+    // Create a tensor holding the resource handle.
+    AllocatorAttributes attr_resource;
+    attr_resource.set_on_host(true);
+    Tensor tensor;
+    OP_REQUIRES_OK(
+        context, context->allocate_temp(DT_RESOURCE, TensorShape({}), &tensor, attr_resource));
+    tensor.scalar<ResourceHandle>()() = std::move(handle);
+
+    // Add the resource handle tensor to the op kernel inputs.
+    inputs.emplace_back(&tensor);
+
+    test->RunValidationAndConversion(node_def);
+    TRT_TensorOrWeights output;
+    TF_EXPECT_OK(test->GetTensorOrWeights("my_var", &output));
+    EXPECT_THAT(output.weights(),
+                ShapedWeightsHasDimsAndValues<CType>(p.dims, expected_value));
+  }
+}
+
+TEST_F(VariableOpConverterTest, ConvertReadVariableOp) {
+  TestConvertReadVariableOp<DT_FLOAT, float>(this);
+  // TestConvertReadVariableOp<DT_HALF, Eigen::half>(this);
 }
 
 template <DataType dtype, typename InputCType, typename OutputCType>
