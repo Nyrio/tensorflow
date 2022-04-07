@@ -23,14 +23,21 @@ import numpy as np
 from tensorflow.dtensor.proto import layout_pb2
 from tensorflow.python.framework import config as tf_config
 from tensorflow.python.framework import device as tf_device
+from tensorflow.python.util.tf_export import tf_export
 
 # UNSHARDED indicates a tensor dimension is not sharded over any mesh dimension.
 UNSHARDED = 'unsharded'
 MATCH = 'match'
 
+tf_export('experimental.dtensor.UNSHARDED', v1=[]).export_constant(
+    __name__, 'UNSHARDED')
+tf_export('experimental.dtensor.MATCH', v1=[]).export_constant(
+    __name__, 'MATCH')
+
 MeshDimension = collections.namedtuple('MeshDimension', ['name', 'size'])
 
 
+@tf_export('experimental.dtensor.Mesh', v1=[])
 class Mesh(object):
   """Represents a Mesh configuration over a certain list of Mesh Dimensions."""
 
@@ -188,6 +195,9 @@ class Mesh(object):
 
   def contains_dim(self, dim_name: str) -> bool:
     return dim_name in self._dim_dict
+
+  def __contains__(self, dim_name: str) -> bool:
+    return self.contains_dim(dim_name)
 
   def dim_size(self, dim_name: str) -> int:
     """Returns the size of a dimension."""
@@ -368,11 +378,11 @@ class Mesh(object):
   def size(self) -> int:
     return len(np.ravel(self._global_device_ids))
 
-  def __getattr__(self, name):
-    if name not in self._dim_dict:
-      raise AttributeError('name : %s not defined in mesh : %s' %
-                           (name, self._dim_dict.keys()))
-    return self._dim_dict[name]
+  def __getitem__(self, dim_name: str) -> MeshDimension:
+    if dim_name not in self._dim_dict:
+      raise KeyError(
+          f'Dimension {dim_name} not defined in mesh: {self._dim_dict.keys()}')
+    return self._dim_dict[dim_name]
 
   # TODO(b/168730933): Define a nicer mesh ID.
   def __hash__(self):
@@ -387,6 +397,7 @@ class Mesh(object):
 
 
 # TODO(hthu): Consider making this class immutable.
+@tf_export('experimental.dtensor.Layout', v1=[])
 class Layout(object):
   """Represents the layout information for a Tensor."""
 
@@ -419,7 +430,7 @@ class Layout(object):
              'in a layout.').format(
                  mesh_dim=dim_sharding, sharding_specs=sharding_specs))
       # Check dim_sharding is mesh dimension.
-      if not mesh.contains_dim(dim_sharding):
+      if dim_sharding not in mesh:
         raise ValueError(
             ('{dim_sharding}: A dimension sharding must either be a ' +
              'valid mesh dimension or UNSHARDED.').format(

@@ -5,6 +5,7 @@ load(
     "//tensorflow/core/platform:build_config.bzl",
     "tf_dtensor_tpu_dependencies",
 )
+load("//tensorflow:tensorflow.bzl", "tf_kernel_library")
 
 default_visibility = [
     "//tensorflow/dtensor:dtensor-internal",
@@ -159,7 +160,7 @@ cc_library(
     ],
 )
 
-cc_library(
+tf_kernel_library(
     name = "dtensor_kernels",
     srcs = [
         "dtensor_sharded_prefix_kernel.cc",
@@ -184,12 +185,15 @@ cc_library(
     alwayslink = 1,
 )
 
-cc_library(
+tf_kernel_library(
     name = "dtensor_tpu_kernels",
     srcs = [
         "dtensor_tpu_kernels.cc",
     ],
-    tags = ["no_rocm"],  # Disable building of TPU kernels on RoCM.
+    tags = [
+        "no_rocm",
+        "tpu",
+    ],  # Disable building of TPU kernels on non-TPU platforms.
     deps = [
         ":dstatus",
         ":tpu_system_interface",

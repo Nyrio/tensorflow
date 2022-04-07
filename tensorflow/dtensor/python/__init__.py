@@ -15,6 +15,8 @@
 """DTensor Python API."""
 
 from tensorflow.dtensor.python import gen_dtensor_ops as ops
+from tensorflow.dtensor.python import mesh_util
+from tensorflow.dtensor.python import tpu_util
 
 from tensorflow.dtensor.python.api import call_with_layout
 from tensorflow.dtensor.python.api import check_layout
@@ -44,5 +46,3 @@ from tensorflow.dtensor.python.save_restore import enable_save_as_bf16
 from tensorflow.dtensor.python.save_restore import name_based_restore
 from tensorflow.dtensor.python.save_restore import name_based_save
 from tensorflow.dtensor.python.save_restore import sharded_save
-
-from tensorflow.python.eager import context

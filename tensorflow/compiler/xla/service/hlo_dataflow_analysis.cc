@@ -36,7 +36,6 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_instructions.h"
 #include "tensorflow/compiler/xla/service/hlo_module.h"
 #include "tensorflow/compiler/xla/service/hlo_opcode.h"
-#include "tensorflow/compiler/xla/service/hlo_value.h"
 #include "tensorflow/compiler/xla/shape_util.h"
 #include "tensorflow/compiler/xla/status.h"
 #include "tensorflow/compiler/xla/types.h"
@@ -1657,121 +1656,141 @@ namespace {
 // 'get-tuple-element' instructions are followed. This is because it is assumed
 // that tupling a value and then extracting it from the tuple again will not
 // occur in properly-optimized IR.
-std::pair<HloInstruction*, ShapeIndex> FollowTupleIndirection(
-    HloInstruction* instruction, ShapeIndex operand_index) {
+std::pair<const HloInstruction*, ShapeIndex> FollowTupleIndirection(
+    const HloInstruction* instruction, ShapeIndex operand_index) {
   while (instruction->opcode() == HloOpcode::kTuple && !operand_index.empty()) {
-    instruction = instruction->mutable_operand(operand_index.front());
+    instruction = instruction->operand(operand_index.front());
     operand_index.pop_front();
   }
   while (instruction->opcode() == HloOpcode::kGetTupleElement) {
     operand_index.push_front(instruction->tuple_index());
-    instruction = instruction->mutable_operand(0);
+    instruction = instruction->operand(0);
   }
 
   return {instruction, operand_index};
 }
 
-// Returns in-place input/output pairs for the given fusion op, according to the
-// aliasing rules for the corresponding fusion computation.
-std::vector<std::pair<HloUse, ShapeIndex>>
-GetFusionInstructionInPlaceInputOutputPairs(HloInstruction* instruction) {
-  std::vector<std::pair<HloUse, ShapeIndex>> input_output_pairs;
-  for (const auto& indexed_shape :
+// Returns in-place input/output pairs for the given fusion instruction,
+// according to the aliasing rules for the corresponding fusion computation.
+//
+// `instruction` must be a fusion instruction.
+std::vector<std::pair<HloOperandIndex, ShapeIndex>>
+GetFusionInstructionInPlaceInputOutputPairs(const HloInstruction* instruction) {
+  std::vector<std::pair<HloOperandIndex, ShapeIndex>>
+      in_place_input_output_pairs;
+  // Each of these leaves represents one array output of the fusion that might
+  // be aliased with one of the fusion computation's array inputs (both could be
+  // nested arbitrarily deep inside tuples).
+  for (const auto& fusion_output_array_shape :
        ShapeUtil::GetLeafShapes(instruction->shape())) {
-    ShapeIndex expected_output_index = indexed_shape.index;
-    HloInstruction* hlo_generating_output =
+    // Start from the root instruction of the fusion computation and follow
+    // tuple indirection backwards to find the "output source", i.e. the
+    // instruction that is the original source of the array output in question.
+    // If there is no such indirection the "output source" will just be the
+    // fusion root instruction itself.
+    const HloInstruction* output_source_instruction =
         instruction->fused_expression_root();
+    ShapeIndex output_source_index = fusion_output_array_shape.index;
+    std::tie(output_source_instruction, output_source_index) =
+        FollowTupleIndirection(output_source_instruction, output_source_index);
 
-    std::tie(hlo_generating_output, expected_output_index) =
-        FollowTupleIndirection(hlo_generating_output, expected_output_index);
+    // The aliasing rules of the "output source" instruction determine the
+    // aliasing rules for the entire fusion. If we can connect (following tuple
+    // indirection) the input of an "in-place" pair to one of the fusion's
+    // inputs, and the output of this "in-place" pair to the fusion output
+    // in question, then this fusion input and output must alias.
+    auto in_place_pairs = HloDataflowAnalysis::GetInPlaceInputOutputPairs(
+        output_source_instruction);
+    ShapeIndex in_place_input_index;
+    const HloInstruction* in_place_input_source = nullptr;
 
-    ShapeIndex operand_index;
-    HloInstruction* fusion_parameter = nullptr;
-    auto nested_pairs =
-        HloDataflowAnalysis::GetInPlaceInputOutputPairs(hlo_generating_output);
-
-    for (const auto& pair : nested_pairs) {
-      const HloUse& input = pair.first;
-      const ShapeIndex& output_index = pair.second;
-      if (output_index == expected_output_index) {
-        CHECK(fusion_parameter == nullptr);
-        fusion_parameter =
-            hlo_generating_output->mutable_operand(input.operand_number);
-        operand_index = input.operand_index;
+    for (const auto& output_source_in_place_pair : in_place_pairs) {
+      const HloOperandIndex& input = output_source_in_place_pair.first;
+      const ShapeIndex& output_index = output_source_in_place_pair.second;
+      if (output_index == output_source_index) {
+        // It is not possible for the same output to alias multiple inputs.
+        CHECK(in_place_input_source == nullptr);
+        in_place_input_source =
+            output_source_instruction->operand(input.operand_number);
+        in_place_input_index = input.operand_index;
       }
     }
 
-    if (fusion_parameter) {
-      std::tie(fusion_parameter, operand_index) =
-          FollowTupleIndirection(fusion_parameter, operand_index);
+    if (in_place_input_source) {
+      // Follow tuple indirection backwards from the instruction input to try to
+      // find a fusion parameter. If found, that parameter aliases the current
+      // output. If not, the current output aliases no input.
+      std::tie(in_place_input_source, in_place_input_index) =
+          FollowTupleIndirection(in_place_input_source, in_place_input_index);
 
-      if (fusion_parameter->opcode() == HloOpcode::kParameter) {
-        input_output_pairs.emplace_back(
-            HloUse{instruction, fusion_parameter->parameter_number(),
-                   operand_index},
-            indexed_shape.index);
+      if (in_place_input_source->opcode() == HloOpcode::kParameter) {
+        in_place_input_output_pairs.emplace_back(
+            HloOperandIndex{in_place_input_source->parameter_number(),
+                            in_place_input_index},
+            fusion_output_array_shape.index);
       }
     }
   }
-  return input_output_pairs;
+  return in_place_input_output_pairs;
 }
 
 }  // namespace
 
-/*static*/ std::vector<std::pair<HloUse, ShapeIndex>>
-HloDataflowAnalysis::GetInPlaceInputOutputPairs(HloInstruction* instruction) {
+/*static*/ std::vector<std::pair<HloOperandIndex, ShapeIndex>>
+HloDataflowAnalysis::GetInPlaceInputOutputPairs(
+    const HloInstruction* instruction) {
   if (IsInPlaceOperation(instruction->opcode())) {
-    return {{HloUse{instruction, 0, {}}, {}}};
+    return {{HloOperandIndex{0, {}}, {}}};
   } else if (instruction->opcode() == HloOpcode::kCollectivePermute &&
              instruction->operands().size() == 4) {
     if (instruction->operand(1)->shape().IsTuple()) {
-      std::vector<std::pair<HloUse, ShapeIndex>> in_place_pairs(
-          {{HloUse{instruction, 1, {}}, {}}});
+      std::vector<std::pair<HloOperandIndex, ShapeIndex>> in_place_pairs(
+          {{HloOperandIndex{1, {}}, {}}});
       for (int i = 0; i < instruction->operand(1)->shape().tuple_shapes_size();
            i++) {
-        in_place_pairs.push_back({HloUse{instruction, 1, {i}}, {i}});
+        in_place_pairs.push_back({HloOperandIndex{1, {i}}, {i}});
       }
       return in_place_pairs;
     } else {
-      return {{HloUse{instruction, 1, {}}, {}}};
+      return {{HloOperandIndex{1, {}}, {}}};
     }
   } else if (instruction->opcode() == HloOpcode::kCollectivePermuteStart &&
              instruction->operands().size() == 4) {
     if (instruction->operand(1)->shape().IsTuple()) {
-      std::vector<std::pair<HloUse, ShapeIndex>> in_place_pairs(
-          {{HloUse{instruction, 1, {}}, {1}}});
+      std::vector<std::pair<HloOperandIndex, ShapeIndex>> in_place_pairs(
+          {{HloOperandIndex{1, {}}, {1}}});
       for (int i = 0; i < instruction->operand(1)->shape().tuple_shapes_size();
            i++) {
-        in_place_pairs.push_back({HloUse{instruction, 1, {i}}, {1, i}});
+        in_place_pairs.push_back({HloOperandIndex{1, {i}}, {1, i}});
       }
       return in_place_pairs;
     } else {
-      return {{HloUse{instruction, 1, {}}, {1}}};
+      return {{HloOperandIndex{1, {}}, {1}}};
     }
   } else if (instruction->opcode() == HloOpcode::kCustomCall) {
     // Custom Calls previously assumed that aliased operands were
     // forwarded, but now supports modifiction semantics.
     const auto& aliasing_pairs = Cast<HloCustomCallInstruction>(instruction)
                                      ->output_to_operand_aliasing();
-    std::vector<std::pair<HloUse, ShapeIndex>> in_place_pairs;
+    std::vector<std::pair<HloOperandIndex, ShapeIndex>> in_place_pairs;
     in_place_pairs.reserve(aliasing_pairs.size());
     for (const auto& pair : aliasing_pairs) {
       ShapeIndex output_shape_index = pair.first;
       int64_t operand_index = pair.second.first;
       ShapeIndex operand_shape_index = pair.second.second;
       in_place_pairs.push_back(
-          {HloUse{instruction, operand_index, {operand_shape_index}},
+          {HloOperandIndex{operand_index, {operand_shape_index}},
            output_shape_index});
     }
     return in_place_pairs;
   } else if (instruction->opcode() == HloOpcode::kAllReduceStart) {
     if (instruction->operands().size() == 1) {
-      return {{HloUse{instruction, 0, {}}, {}}};
+      return {{HloOperandIndex{0, {}}, {}}};
     }
-    std::vector<std::pair<HloUse, ShapeIndex>> in_place_pairs;
+    std::vector<std::pair<HloOperandIndex, ShapeIndex>> in_place_pairs;
     in_place_pairs.reserve(instruction->operands().size());
     for (int i = 0; i < instruction->operands().size(); i++) {
-      in_place_pairs.push_back({HloUse{instruction, i, {}}, {i}});
+      in_place_pairs.push_back({HloOperandIndex{i, {}}, {i}});
     }
     return in_place_pairs;
   } else if (instruction->opcode() == HloOpcode::kFusion) {
@@ -1779,16 +1798,6 @@ HloDataflowAnalysis::GetInPlaceInputOutputPairs(HloInstruction* instruction) {
   }
 
   return {};
-}
-
-bool HloDataflowAnalysis::HasInPlaceOperations(
-    const HloInstruction& instruction) {
-  // GetInPlaceInputOutputPairs can return non-const pointers to the
-  // instruction, so cannot be used with a const pointer. However, this is safe
-  // to do if the results are unused (as they are here), hence the const_cast.
-  HloInstruction* unconst_instruction =
-      const_cast<HloInstruction*>(&instruction);
-  return !GetInPlaceInputOutputPairs(unconst_instruction).empty();
 }
 
 bool HloDataflowAnalysis::CanShareOperandBufferWithUser(
@@ -1829,7 +1838,8 @@ bool HloDataflowAnalysis::CanShareOperandBufferWithUser(
       }
       for (const HloUse& use :
            GetUniqueValueAt(operand, operand_index).GetUses()) {
-        if (use == operand_and_output_index.first) {
+        if (use == HloUse{user, operand_and_output_index.first.operand_number,
+                          operand_and_output_index.first.operand_index}) {
           return true;
         }
       }
