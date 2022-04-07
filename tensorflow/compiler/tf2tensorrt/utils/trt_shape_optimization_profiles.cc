@@ -516,10 +516,10 @@ Status TrtShapeOptimizationProfile::SetPrunedMask(
   for (int j = 0; j < n_network_inputs; j++) {
     int binding_idx;
     Status status = GetTrtBindingIndex(j, 0, engine, &binding_idx);
-    if (IS_TRT_VERSION_GE(8, 0, 0, 0)) {
-      TF_RETURN_IF_ERROR(status);
-    } else if (!status.ok()) {
+    if (!status.ok()) {
       // Before TRT 8, an input tensor can be pruned (nvbugs/3153064)
+      // Resource inputs are also unknown by TRT, so we can treat them as
+      // pruned (the engine includes the variable as weights).
       is_pruned_input_[j] = true;
       VLOG(2) << "Skipping pruned input " << j;
       continue;
@@ -530,7 +530,6 @@ Status TrtShapeOptimizationProfile::SetPrunedMask(
 
 Status TrtShapeOptimizationProfile::RestoreProfiles(
     const nvinfer1::ICudaEngine* engine, int n_network_inputs) {
-  /// TODO: handle resource inputs here
   need_profiles_ = false;
   if (!engine) {
     // We do not need to restore profiles for an empty engine.
