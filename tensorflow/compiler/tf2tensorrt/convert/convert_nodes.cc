@@ -3606,119 +3606,6 @@ Status ConvertConst(OpConverterParams* params) {
   return Status::OK();
 }
 
-Status ConvertReadVariableOp(OpConverterParams* params) {
-  const auto& inputs = params->inputs;
-  const auto& node_def = params->node_def;
-
-  // Only float supported for now.
-  std::set<DataType> allowed_types{DataType::DT_FLOAT};
-  TF_RETURN_IF_ERROR(AllowDataTypes(*params, allowed_types));
-  TF_RETURN_IF_ERROR(
-      CheckInputsWeights(*params, {{"resource", TrtInputArg::kResource}}));
-
-  const TRT_TensorOrWeights& handle = inputs.at(0);
-
-  AttrSlice attrs(node_def);
-  DataType dtype;
-  TF_RETURN_IF_ERROR(GetNodeAttr(attrs, "dtype", &dtype));
-  const string name = node_def.name();
-
-  if (params->validation_only) {
-    TensorShapeProto shape_proto;
-    TF_RETURN_IF_ERROR(GetNodeAttr(AttrSlice(node_def), "_shape", &shape_proto));
-    const TensorShape shape(shape_proto);
-    Tensor tensor(DataType::DT_FLOAT, shape);
-    auto tensor_flat = tensor.flat<float>();
-
-    TRT_ShapedWeights weights;
-    TF_RETURN_IF_ERROR(
-        TfTensorToTrtWeights(tensor, params->weight_store, &weights));
-
-    if (params->outputs != nullptr) {
-      params->outputs->push_back(TRT_TensorOrWeights(weights));
-    }
-  } else {
-    auto ctx = params->converter->context();
-    auto lib = ctx->function_library();
-
-    // Clone function library runtime to add functions.
-    std::unique_ptr<FunctionLibraryDefinition> lib_def;
-    std::unique_ptr<ProcessFunctionLibraryRuntime> lib_pflr;
-    FunctionLibraryRuntime* lib_clone;  // TODO: destroy?
-    TF_RETURN_IF_ERROR(lib->Clone(&lib_def, &lib_pflr, &lib_clone));
-
-    // Create function definition.
-    string func_name = name + "/func";
-    FunctionDef fdef = FunctionDefHelper::Define(
-        func_name,         // Name
-        {"in: resource"},  // Args
-        {"out: float"},    // Returns
-        {},                // Attr def
-        // Nodes
-        {{{name},
-          "ReadVariableOp",
-          {"in"},  // Name of the Placeholder or VarHandleOp
-          {{"dtype", DT_FLOAT}}},
-         {{"out"}, "Identity", {name}, {{"T", DT_FLOAT}}}});
-
-    // Add function definition to the library.
-    lib_def->AddFunctionDef(fdef);
-
-    // Instanciate function.
-    FunctionLibraryRuntime::Handle func_handle;
-    FunctionLibraryRuntime::InstantiateOptions inst_ops;
-    inst_ops.state_handle = "";
-    inst_ops.target = ctx->device()->name();
-    AttrValueMap attr_list;  // TODO: what attributes should it have?
-    TF_RETURN_IF_ERROR(lib_clone->Instantiate(func_name, AttrSlice(&attr_list),
-                                              inst_ops, &func_handle));
-
-    FunctionLibraryRuntime::Options opts;
-    opts.rendezvous = ctx->rendezvous();
-    opts.cancellation_manager = ctx->cancellation_manager();
-    opts.runner = ctx->runner();
-    /// TODO: figure out these options
-
-    // Create arg tensor and copy the handle.
-    // TensorShape handle_shape;
-    // TensorShape::BuildTensorShape({}, &handle_shape);
-    std::vector<Tensor> args;
-    args.emplace_back(handle.resource());
-
-    /// TODO: figure out whether this needs to be destroyed
-    std::vector<Tensor>* rets = new std::vector<Tensor>();
-
-    // Run the new function synchronously.
-    lib_clone->RunSync(opts, func_handle, args, rets);
-
-    // Create weights with the same shape as the output tensor.
-    Tensor tensor(DataType::DT_FLOAT, (*rets)[0].shape());
-    auto tensor_flat = tensor.flat<float>();
-
-    // Copy tensor.
-    /// TODO: figure out if tensor is on host or device?
-    const cudaStream_t* stream = CHECK_NOTNULL(
-        reinterpret_cast<const cudaStream_t*>(ctx->op_device_context()
-                                                  ->stream()
-                                                  ->implementation()
-                                                  ->GpuStreamMemberHack()));
-
-    cudaMemcpyAsync(tensor_flat.data(), rets->at(0).flat<float>().data(),
-                    rets->at(0).NumElements() * sizeof(float),
-                    cudaMemcpyDeviceToHost, *stream);
-    /// TODO: error checking
-
-    TRT_ShapedWeights weights;
-    TF_RETURN_IF_ERROR(
-        TfTensorToTrtWeights(tensor, params->weight_store, &weights));
-
-    if (params->outputs != nullptr) {
-      params->outputs->push_back(TRT_TensorOrWeights(weights));
-    }
-  }
-  return Status::OK();
-}
-
 Status ConvertIdentity(OpConverterParams* params) {
   // TODO(tmorris): TRT's Identity layer does not get optimized away as of TRT
   // 5.0, however once we know that it does it would be nice to use that
@@ -6001,7 +5888,6 @@ REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertReshape, "Reshape");
 REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertConv3D, "Conv3D");
 REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertConv3DBackpropInputV2,
                                   "Conv3DBackpropInputV2");
-REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertReadVariableOp, "ReadVariableOp");
 REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertResize, "ResizeBilinear");
 REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertResize, "ResizeNearestNeighbor");
 REGISTER_DEFAULT_TRT_OP_CONVERTER(ConvertPool3D, "AvgPool3D");
