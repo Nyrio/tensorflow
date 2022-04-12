@@ -302,10 +302,10 @@ Status GetTrtBroadcastShape(const TRT_TensorOrWeights& operand_l,
   // -> T: 1 1 1 -1 3 5 1
   // -> W: 1 1 1  1 3 5 1
   // ***************************************************************************
-  if (!operand_l.is_tensor() && !operand_r.is_tensor()) {
-    return errors::InvalidArgument(
-        "Broadcasting requires at least one of the operands be tensors");
-  }
+  // if (!operand_l.is_tensor() && !operand_r.is_tensor()) {
+  //   return errors::InvalidArgument(
+  //       "Broadcasting requires at least one of the operands be tensors");
+  // }
 
   constexpr int max_nb_dims = nvinfer1::Dims::MAX_DIMS + 1;
   auto compute_output_dims =
@@ -3393,11 +3393,10 @@ Status ConvertBiasAdd(OpConverterParams* params) {
   const auto& node_def = params->node_def;
   TFTRT_CHECK_INPUT_SIZE(inputs.size(), 2, node_def);
 
-  if (inputs[0].is_weights() && inputs[1].is_weights()) {
-    /// TODO: handle this
-    return errors::InvalidArgument(
-        "All inputs are weights, but Grappler is expected to fold them.");
-  }
+  // if (inputs[0].is_weights() && inputs[1].is_weights()) {
+  //   return errors::InvalidArgument(
+  //       "All inputs are weights, but Grappler is expected to fold them.");
+  // }
 
   TF_RETURN_IF_ERROR(
       AllowDataTypes(*params, {DataType::DT_FLOAT, DataType::DT_HALF}));
