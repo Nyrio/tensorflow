@@ -3616,18 +3616,6 @@ Status ConvertIdentity(OpConverterParams* params) {
   return Status::OK();
 }
 
-Status ConvertIdentity(OpConverterParams* params) {
-  // TODO(tmorris): TRT's Identity layer does not get optimized away as of TRT
-  // 5.0, however once we know that it does it would be nice to use that
-  // instead.
-  if (params->validation_only) return Status::OK();
-
-  for (int i = 0; i < params->inputs.size(); i++) {
-    params->outputs->push_back(params->inputs.at(i));
-  }
-  return Status::OK();
-}
-
 Status ConvertRsqrt(OpConverterParams* params) {
   const auto& inputs = params->inputs;
   const auto& node_def = params->node_def;
