@@ -1650,7 +1650,7 @@ class VariableOpConverterTest : public OpConverterTest {
                                 &kernel_ptr));
      op_kernel_ = std::unique_ptr<OpKernel>(kernel_ptr);
 
-     auto* dev_info = device_ptr->tensorflow_gpu_device_info();
+     auto* dev_info = device_ptr->tensorflow_accelerator_device_info();
      CHECK(dev_info);
      DeviceContext* device_context = dev_info->default_context;
 
@@ -1680,92 +1680,6 @@ class VariableOpConverterTest : public OpConverterTest {
 
      // Add resource for conversion.
      TF_EXPECT_OK(AddTensorOrWeights(name, TRT_TensorOrWeights{resource}));
-   }
-
-  private:
-   // The following pointers manage the kernel context.
-   std::unique_ptr<DeviceMgr> device_mgr_;
-   std::unique_ptr<Allocator> managed_allocator_;
-   std::unique_ptr<ScopedStepContainer> step_container_;
-   std::unique_ptr<checkpoint::TensorSliceReaderCacheWrapper>
-       slice_reader_cache_wrapper_;
-   std::unique_ptr<FunctionLibraryDefinition> flib_def_;
-   std::unique_ptr<thread::ThreadPool> thread_pool_;
-   std::unique_ptr<ProcessFunctionLibraryRuntime> pflr_;
-   OpKernelContext::Params params_;
-   std::unique_ptr<OpKernel> op_kernel_;
-   std::unique_ptr<OpKernelContext> context_;
-   std::shared_ptr<const NodeProperties> props_;
-   gtl::InlinedVector<TensorValue, 4> inputs_;
-};
-
-// Extends the OpConverterTest for variable converters which require a properly
-// setup context.
-class VariableOpConverterTest : public OpConverterTest {
-  public:
-   void Reset(TrtPrecisionMode precision_mode_to_test = TrtPrecisionMode::FP32,
-              TrtTestMode trt_mode = TrtTestMode::kImplicitBatch) {
-     OpConverterTest::Reset(precision_mode_to_test, trt_mode, context_.get());
-   }
-
-   void CreateContext(const NodeDef& node_def, OpKernel** kernel,
-                      OpKernelContext** context) {
-     std::unique_ptr<Device> device_(
-         DeviceFactory::NewDevice("GPU", {}, "/job:a/replica:0/task:0"));
-     Device* device_ptr = device_.get();
-
-     device_mgr_ = absl::make_unique<StaticDeviceMgr>(std::move(device_));
-
-     managed_allocator_ = absl::make_unique<GpuManagedAllocator>();
-     Allocator* allocator = managed_allocator_.get();
-     step_container_ =
-         absl::make_unique<ScopedStepContainer>(0, [](const string&) {});
-     slice_reader_cache_wrapper_ =
-         absl::make_unique<checkpoint::TensorSliceReaderCacheWrapper>();
-
-     flib_def_ = absl::make_unique<FunctionLibraryDefinition>(
-         OpRegistry::Global(), FunctionDefLibrary{});
-
-     thread_pool_ =
-         absl::make_unique<thread::ThreadPool>(Env::Default(), "default",
-                                               /*num_threads=*/1);
-     pflr_ = absl::make_unique<ProcessFunctionLibraryRuntime>(
-         device_mgr_.get(), Env::Default(), /*config=*/nullptr,
-         TF_GRAPH_DEF_VERSION, flib_def_.get(), OptimizerOptions(),
-         thread_pool_.get());
-
-     FunctionLibraryRuntime* flib = pflr_->GetFLR(device_ptr->name());
-     ResourceMgr* resource_mgr = device_ptr->resource_manager();
-
-     TF_CHECK_OK(NodeProperties::CreateFromNodeDef(
-         node_def, OpRegistry::Global(), &props_));
-
-     OpKernel* kernel_ptr = nullptr;
-     TF_CHECK_OK(CreateOpKernel(DEVICE_GPU, device_ptr, allocator, flib,
-                                resource_mgr, props_, TF_GRAPH_DEF_VERSION,
-                                &kernel_ptr));
-     op_kernel_ = std::unique_ptr<OpKernel>(kernel_ptr);
-
-     auto* dev_info = device_ptr->tensorflow_accelerator_device_info();
-     CHECK(dev_info);
-     DeviceContext* device_context = dev_info->default_context;
-
-     // Note: this setup is not exhaustive.
-     params_.device = device_ptr;
-     params_.op_kernel = op_kernel_.get();
-     params_.resource_manager = resource_mgr;
-     params_.frame_iter = FrameAndIter(0, 0);
-     params_.inputs = &inputs_;
-     params_.step_container = step_container_.get();
-     params_.function_library = flib;
-     params_.slice_reader_cache = slice_reader_cache_wrapper_.get();
-     params_.op_device_context = device_context;
-
-     context_ = absl::make_unique<OpKernelContext>(&params_);
-
-     // Outputs.
-     *kernel = op_kernel_.get();
-     *context = context_.get();
    }
 
   private:
@@ -2201,7 +2115,6 @@ void CopyTensorElements(const Tensor& tensor, protobuf::RepeatedField<T>* out) {
 template <DataType dtype, typename CType>
 void TestConvertVariableV2(VariableOpConverterTest* test) {
   struct TestParam {
-    // TODO: more params
     string container;
     string shared_name;
     std::vector<int> dims;
@@ -2239,7 +2152,6 @@ void TestConvertVariableV2(VariableOpConverterTest* test) {
     std::vector<CType> expected_value;
     expected_value.reserve(var_size);
     for (int i = 0; i < var_size; i++) {
-      // Set expected_value[i] = (cast)i.
       expected_value.push_back((CType)i);
     }
 
@@ -2251,7 +2163,7 @@ void TestConvertVariableV2(VariableOpConverterTest* test) {
     Tensor* tensor_ptr = context->mutable_output(0);
     CHECK(tensor_ptr);
     // We allocate the tensor in the temporary memory. Note that creating a
-    // tensor in this scooe and sharing the underlying storage by copy would
+    // tensor in this scope and sharing the underlying storage by copy would
     // lead to double destruction.
     AllocatorAttributes attr;
     attr.set_gpu_compatible(true);
